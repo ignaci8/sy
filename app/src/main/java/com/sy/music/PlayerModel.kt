@@ -11,6 +11,7 @@ import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -27,6 +28,7 @@ import kotlinx.coroutines.withContext
 
 private const val STARTER_QUERY = "éxitos del momento"
 private const val POSITION_REFRESH_MS = 500L
+private const val MAX_ARTIST_RESULTS = 6
 private val LINK = Regex("""https?://\S+""")
 
 class PlayerModel(app: Application) : AndroidViewModel(app) {
@@ -43,10 +45,22 @@ class PlayerModel(app: Application) : AndroidViewModel(app) {
 
     var current by mutableStateOf<MediaItem?>(null)
         private set
-    var queue by mutableStateOf(emptyList<MediaItem>())
+    /** Lo que sonará después, en el orden real (también con aleatorio), con su posición en la cola. */
+    var upcoming by mutableStateOf(emptyList<Pair<Int, MediaItem>>())
         private set
-    var index by mutableIntStateOf(0)
+    var shuffle by mutableStateOf(false)
         private set
+    var artistResults by mutableStateOf(emptyList<ArtistRef>())
+        private set
+    var artist by mutableStateOf<ArtistPage?>(null)
+        private set
+    var album by mutableStateOf<AlbumPage?>(null)
+        private set
+    var detailLoading by mutableStateOf(false)
+        private set
+    var collapseRequests by mutableIntStateOf(0)
+        private set
+    val detailOpen get() = artist != null || album != null || detailLoading
     var isPlaying by mutableStateOf(false)
         private set
     var buffering by mutableStateOf(false)
@@ -67,6 +81,7 @@ class PlayerModel(app: Application) : AndroidViewModel(app) {
         private set
 
     private var lyricsFor: String? = null
+    private val queuedByHand = mutableSetOf<String>()
     private var lastQuery = ""
     private var controller: MediaController? = null
     private val controllerFuture = MediaController.Builder(
@@ -132,8 +147,16 @@ class PlayerModel(app: Application) : AndroidViewModel(app) {
 
     private fun sync(player: Player) {
         current = player.currentMediaItem
-        queue = (0 until player.mediaItemCount).map { player.getMediaItemAt(it) }
-        index = player.currentMediaItemIndex
+        shuffle = player.shuffleModeEnabled
+        upcoming = buildList {
+            val timeline = player.currentTimeline
+            if (timeline.isEmpty) return@buildList
+            var i = timeline.getNextWindowIndex(player.currentMediaItemIndex, Player.REPEAT_MODE_OFF, shuffle)
+            while (i != C.INDEX_UNSET) {
+                add(i to player.getMediaItemAt(i))
+                i = timeline.getNextWindowIndex(i, Player.REPEAT_MODE_OFF, shuffle)
+            }
+        }
         isPlaying = player.isPlaying
         buffering = player.playbackState == Player.STATE_BUFFERING
     }
@@ -179,10 +202,92 @@ class PlayerModel(app: Application) : AndroidViewModel(app) {
                 if (query == lastQuery) searching = false
             }
         }
+        viewModelScope.launch {
+            val found = try {
+                withContext(Dispatchers.IO) { YouTubeMusic.searchArtists(query).take(MAX_ARTIST_RESULTS) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                emptyList()
+            }
+            if (query == lastQuery) artistResults = found
+        }
+    }
+
+    private fun loadDetail(block: suspend () -> Unit) {
+        collapseRequests++
+        detailLoading = true
+        viewModelScope.launch {
+            try {
+                block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                toast("No se pudo abrir")
+            } finally {
+                detailLoading = false
+            }
+        }
+    }
+
+    fun openArtist(id: String) = loadDetail {
+        album = null
+        artist = withContext(Dispatchers.IO) { YouTubeMusic.artist(id) }
+    }
+
+    fun openArtistByName(name: String) = loadDetail {
+        album = null
+        artist = withContext(Dispatchers.IO) { YouTubeMusic.artistFromName(name) }
+        if (artist == null) toast("No encontré ese artista")
+    }
+
+    fun openAlbum(id: String) = loadDetail {
+        album = withContext(Dispatchers.IO) { YouTubeMusic.album(id) }
+    }
+
+    /** Del álbum vuelve al artista, y del artista a la pestaña. */
+    fun closeDetail() {
+        if (album != null) album = null else artist = null
+    }
+
+    fun closeDetails() {
+        album = null
+        artist = null
+    }
+
+    fun toggleShuffle() {
+        controller?.run { shuffleModeEnabled = !shuffleModeEnabled }
+    }
+
+    /** Entra justo después de lo ya puesto en la fila a mano, antes de la radio. */
+    fun addToQueue(song: Song) {
+        val player = controller ?: return
+        if (player.mediaItemCount == 0) return play(song)
+        if (player.currentMediaItem?.mediaId == song.url) return toast("Ya está sonando")
+        val existing = (0 until player.mediaItemCount).firstOrNull { player.getMediaItemAt(it).mediaId == song.url }
+        // El gesto puede avisar dos veces; una canción nunca va repetida en la cola.
+        if (existing != null && existing > player.currentMediaItemIndex && song.url in queuedByHand) return
+        existing?.let { player.removeMediaItem(it) }
+        var position = player.currentMediaItemIndex + 1
+        while (position < player.mediaItemCount && player.getMediaItemAt(position).mediaId in queuedByHand) position++
+        player.addMediaItem(position, song.toMediaItem())
+        queuedByHand += song.url
+        toast("Agregada a la fila")
+    }
+
+    fun downloadAll(songs: List<Song>) {
+        val known = Storage.saved.value
+            .filter { it.status != DownloadStatus.FAILED }
+            .map { it.song.url }
+            .toSet()
+        val missing = songs.filter { it.url !in known }
+        missing.forEach { download(it) }
+        toast(if (missing.isEmpty()) "Ya están todas descargadas" else "Descargando ${missing.size} canciones")
     }
 
     fun play(song: Song) {
         error = null
+        queuedByHand.clear()
         controller?.run {
             setMediaItem(song.toMediaItem())
             prepare()
@@ -192,6 +297,7 @@ class PlayerModel(app: Application) : AndroidViewModel(app) {
 
     fun playAll(songs: List<Song>, startIndex: Int) {
         error = null
+        queuedByHand.clear()
         controller?.run {
             setMediaItems(songs.map { it.toMediaItem() }, startIndex, 0)
             prepare()
@@ -203,12 +309,19 @@ class PlayerModel(app: Application) : AndroidViewModel(app) {
     fun handleLink(text: String) {
         val link = LINK.find(text)?.value
         if (link == null) {
-            toast("No encontré un enlace de YouTube")
+            toast("No encontré un enlace")
             return
         }
         viewModelScope.launch {
             try {
-                if (YouTube.isPlaylistLink(link)) {
+                if (Spotify.isLink(link)) {
+                    toast("Importando desde Spotify…")
+                    val (name, tracks) = withContext(Dispatchers.IO) { Spotify.tracks(link) }
+                    val songs = Spotify.matchOnYouTube(tracks)
+                    if (songs.isEmpty()) throw IllegalStateException("Sin coincidencias")
+                    Library.createPlaylist(name, songs)
+                    toast("Playlist importada: $name (${songs.size} de ${tracks.size})")
+                } else if (YouTube.isPlaylistLink(link)) {
                     val (name, songs) = withContext(Dispatchers.IO) { YouTube.playlistFromLink(link) }
                     Library.createPlaylist(name, songs)
                     toast("Playlist importada: $name (${songs.size})")

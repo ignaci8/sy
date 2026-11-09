@@ -73,8 +73,11 @@ internal fun LibraryTab(model: PlayerModel) {
                 if (playlist == null) {
                     LaunchedEffect(Unit) { page = ROOT }
                 } else {
-                    TextButton(onClick = { Library.deletePlaylist(playlist.id) }) {
-                        Text("Eliminar playlist", color = MaterialTheme.colorScheme.error)
+                    Row {
+                        Button(onClick = { model.downloadAll(playlist.songs) }) { Text("Descargar todas") }
+                        TextButton(onClick = { Library.deletePlaylist(playlist.id) }) {
+                            Text("Eliminar playlist", color = MaterialTheme.colorScheme.error)
+                        }
                     }
                     SongListPage(playlist.name, playlist.songs, model) { song ->
                         IconButton(onClick = { Library.removeFromPlaylist(playlist.id, song) }) {
@@ -106,7 +109,7 @@ private fun LibraryRoot(library: LibraryData, model: PlayerModel, open: (String)
         if (library.playlists.isEmpty()) {
             item { Text("Crea una desde el menú ⋮ de cualquier canción.") }
         }
-        item { SectionTitle("Importar desde YouTube") }
+        item { SectionTitle("Importar desde YouTube o Spotify") }
         item {
             OutlinedTextField(
                 link,
@@ -173,17 +176,17 @@ private fun SongListPage(
         item { SectionTitle(title) }
         if (songs.isEmpty()) item { Text("Todavía no hay canciones.") }
         items(songs) { song ->
-            SongRow(
-                song.title,
-                song.artist,
-                song.thumbnail,
+            SongItem(
+                song,
+                model,
                 trailing = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         DownloadButton(song, model)
                         action(song)
                     }
                 },
-            ) { model.playAll(songs, songs.indexOf(song)) }
+                onClick = { model.playAll(songs, songs.indexOf(song)) },
+            )
         }
     }
 }
@@ -213,10 +216,10 @@ private fun DownloadsPage(model: PlayerModel) {
                 DownloadStatus.WORKING -> active[item.song.url] ?: "En cola"
                 DownloadStatus.FAILED -> "Falló la descarga"
             }
-            SongRow(
-                item.song.title,
+            SongItem(
+                item.song,
+                model,
                 subtitle,
-                item.song.thumbnail,
                 trailing = {
                     Row {
                         if (item.status == DownloadStatus.FAILED) DownloadButton(item.song, model)
@@ -226,9 +229,10 @@ private fun DownloadsPage(model: PlayerModel) {
                         }
                     }
                 },
-            ) {
-                if (item.status == DownloadStatus.READY) model.playAll(ready, ready.indexOf(item.song))
-            }
+                onClick = {
+                    if (item.status == DownloadStatus.READY) model.playAll(ready, ready.indexOf(item.song))
+                },
+            )
         }
     }
 }

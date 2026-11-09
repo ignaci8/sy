@@ -243,7 +243,12 @@ class PlaybackService : MediaSessionService() {
         val player = session.player
         val count = player.mediaItemCount
         if (refilling || count == 0) return
-        if (count - player.currentMediaItemIndex > RADIO_REFILL_THRESHOLD) return
+        // En aleatorio la posición no dice cuánto falta: se rellena solo al quedarse sin siguiente.
+        if (player.shuffleModeEnabled) {
+            if (player.hasNextMediaItem()) return
+        } else if (count - player.currentMediaItemIndex > RADIO_REFILL_THRESHOLD) {
+            return
+        }
 
         val seed = player.getMediaItemAt(count - 1).mediaId
         refilling = true

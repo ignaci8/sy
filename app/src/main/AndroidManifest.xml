@@ -12,7 +12,7 @@
         android:name=".SyApp"
         android:icon="@mipmap/ic_launcher"
         android:label="SY"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+        android:theme="@style/Theme.SY">
         <activity
             android:name=".MainActivity"
             android:exported="true"

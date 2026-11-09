@@ -97,6 +97,32 @@ class YouTubeTest {
     }
 
     @Test
+    fun readsSpotifyEmbedData() {
+        val root = org.json.JSONObject(
+            """{"props":{"pageProps":{"state":{"data":{"entity":{"name":"Mix",
+            "trackList":[{"title":"Loser","subtitle":"Tame Impala"}]}}}}}}""",
+        )
+        assertEquals("Mix" to listOf(SpotifyTrack("Loser", "Tame Impala")), parseSpotifyEmbed(root))
+    }
+
+    @Test
+    fun artistPageHasTopSongsAndDiscography() {
+        val page = YouTubeMusic.artistFromName("Daft Punk, Pharrell Williams")!!
+        assertEquals("Daft Punk", page.name)
+        assertTrue(page.topSongs.size >= 5)
+        assertTrue(page.discography.isNotEmpty())
+        assertTrue(YouTubeMusic.album(page.discography.first().albums.first().id).songs.isNotEmpty())
+    }
+
+    @Test
+    fun importsSpotifyPlaylist() {
+        val (name, tracks) = Spotify.tracks("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=abc")
+        val songs = kotlinx.coroutines.runBlocking { Spotify.matchOnYouTube(tracks.take(5)) }
+        println("Spotify: $name, ${tracks.size}, coinciden ${songs.size} de 5: ${songs.map { it.title }}")
+        assertTrue(songs.size >= 4)
+    }
+
+    @Test
     fun songSurvivesSaving() {
         val song = Song("https://www.youtube.com/watch?v=a", "Título ñ \"x\"", "Artista", 200, null)
         assertEquals(song, songFromBytes(song.toBytes()))

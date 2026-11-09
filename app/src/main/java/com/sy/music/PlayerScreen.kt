@@ -1,8 +1,7 @@
 package com.sy.music
 
-import android.graphics.drawable.BitmapDrawable
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -13,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -33,29 +33,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.media3.common.MediaItem
-import androidx.palette.graphics.Palette
 import coil.compose.AsyncImage
-import coil.request.ImageRequest
 
 private val Faded = Color.White.copy(alpha = 0.7f)
 
 @Composable
 internal fun FullPlayer(song: MediaItem, model: PlayerModel, onClose: () -> Unit) {
     val info = song.mediaMetadata
-    var tint by remember { mutableStateOf(Background) }
-    val animatedTint by animateColorAsState(tint, label = "tint")
     var dragging by remember { mutableStateOf<Float?>(null) }
     var showLyrics by remember { mutableStateOf(false) }
-    val context = LocalContext.current
     val library by Library.data.collectAsState()
     val favorite = library.favorites.any { it.url == song.mediaId }
 
@@ -63,11 +56,7 @@ internal fun FullPlayer(song: MediaItem, model: PlayerModel, onClose: () -> Unit
         if (showLyrics) model.loadLyrics(song)
     }
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Brush.verticalGradient(0f to animatedTint, 0.7f to Background)),
-    ) {
+    Box(Modifier.fillMaxSize().background(Background)) {
         LazyColumn(Modifier.systemBarsPadding().padding(horizontal = 24.dp)) {
             item {
                 Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
@@ -86,21 +75,9 @@ internal fun FullPlayer(song: MediaItem, model: PlayerModel, onClose: () -> Unit
                     Lyrics(model)
                 } else {
                     AsyncImage(
-                        model = ImageRequest.Builder(context)
-                            .data(info.artworkUri)
-                            .allowHardware(false) // Palette necesita leer los píxeles
-                            .build(),
+                        info.artworkUri,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
-                        onSuccess = { state ->
-                            (state.result.drawable as? BitmapDrawable)?.bitmap?.let { bitmap ->
-                                Palette.from(bitmap).generate { palette ->
-                                    palette?.getDarkMutedColor(palette.getMutedColor(0))
-                                        ?.takeIf { it != 0 }
-                                        ?.let { tint = Color(it) }
-                                }
-                            }
-                        },
                         modifier = Modifier
                             .fillMaxWidth()
                             .aspectRatio(1f)
@@ -122,7 +99,9 @@ internal fun FullPlayer(song: MediaItem, model: PlayerModel, onClose: () -> Unit
                         color = Faded,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { model.openArtistByName(info.artist.toString()) },
                     )
                     IconButton(onClick = { model.toggleFavorite(song.toSong()) }) {
                         Icon(
@@ -154,6 +133,13 @@ internal fun FullPlayer(song: MediaItem, model: PlayerModel, onClose: () -> Unit
                     Arrangement.SpaceEvenly,
                     Alignment.CenterVertically,
                 ) {
+                    IconButton(onClick = model::toggleShuffle) {
+                        Icon(
+                            painterResource(R.drawable.ic_shuffle),
+                            if (model.shuffle) "Desactivar aleatorio" else "Activar aleatorio",
+                            tint = if (model.shuffle) Accent else Color.White,
+                        )
+                    }
                     IconButton(onClick = model::previous) {
                         Icon(painterResource(R.drawable.ic_previous), "Anterior", tint = Color.White)
                     }
@@ -173,14 +159,13 @@ internal fun FullPlayer(song: MediaItem, model: PlayerModel, onClose: () -> Unit
                     modifier = Modifier.padding(top = 16.dp, bottom = 8.dp),
                 )
             }
-            itemsIndexed(model.queue) { i, item ->
-                if (i > model.index) {
-                    SongRow(
-                        item.mediaMetadata.title.toString(),
-                        item.mediaMetadata.artist.toString(),
-                        item.mediaMetadata.artworkUri,
-                    ) { model.jumpTo(i) }
-                }
+            items(model.upcoming) { (index, item) ->
+                SongRow(
+                    item.mediaMetadata.title.toString(),
+                    item.mediaMetadata.artist.toString(),
+                    item.mediaMetadata.artworkUri,
+                    url = item.mediaId,
+                ) { model.jumpTo(index) }
             }
         }
     }

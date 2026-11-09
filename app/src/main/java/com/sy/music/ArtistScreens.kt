@@ -1,0 +1,93 @@
+package com.sy.music
+
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
+
+@Composable
+internal fun DetailScreen(model: PlayerModel) {
+    Column {
+        IconButton(onClick = model::closeDetail) {
+            Icon(painterResource(R.drawable.ic_back), "Volver")
+        }
+        if (model.detailLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        val album = model.album
+        val artist = model.artist
+        when {
+            album != null -> AlbumView(album, model)
+            artist != null -> ArtistView(artist, model)
+        }
+    }
+}
+
+@Composable
+private fun Header(title: String, subtitle: String?, thumbnail: String?, onPlay: () -> Unit) {
+    AsyncImage(
+        thumbnail,
+        contentDescription = null,
+        contentScale = ContentScale.Crop,
+        modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(16.dp)),
+    )
+    Text(
+        title,
+        style = MaterialTheme.typography.headlineMedium,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.padding(top = 16.dp),
+    )
+    subtitle?.let { Text(it) }
+    Button(onClick = onPlay, modifier = Modifier.padding(vertical = 8.dp)) { Text("Reproducir") }
+}
+
+@Composable
+private fun ArtistView(artist: ArtistPage, model: PlayerModel) {
+    LazyColumn {
+        item {
+            Header(artist.name, null, artist.thumbnail) { model.playAll(artist.topSongs, 0) }
+        }
+        if (artist.topSongs.isNotEmpty()) item { SectionTitle("Más escuchadas") }
+        items(artist.topSongs) { song ->
+            SongItem(song, model, onClick = { model.playAll(artist.topSongs, artist.topSongs.indexOf(song)) })
+        }
+        artist.discography.forEach { section ->
+            item { SectionTitle(section.label) }
+            item {
+                LazyRow {
+                    items(section.albums) { album ->
+                        CoverCard(album.title, album.year, album.thumbnail) { model.openAlbum(album.id) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AlbumView(album: AlbumPage, model: PlayerModel) {
+    LazyColumn {
+        item {
+            Header(album.title, album.artist, album.thumbnail) { model.playAll(album.songs, 0) }
+        }
+        items(album.songs) { song ->
+            SongItem(song, model, onClick = { model.playAll(album.songs, album.songs.indexOf(song)) })
+        }
+    }
+}

@@ -10,6 +10,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -35,17 +36,24 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -65,9 +73,15 @@ import androidx.media3.common.MediaItem
 import coil.compose.AsyncImage
 import kotlinx.coroutines.flow.MutableStateFlow
 
-internal val Background = Color(0xFF0E0E12)
+internal val Background = Color.Black
 internal val Accent = Color(0xFF8AB4FF)
+private val PlayingNow = Color(0xFFFF3B30)
+private val Secondary = Color.White.copy(alpha = 0.7f)
+private val Raised = Color(0xFF1C1C1E)
 private val SMALL_ARTWORK = 80.dp
+
+internal val LocalPlayingUrl = compositionLocalOf<String?> { null }
+internal val LocalPlaylistUrls = compositionLocalOf<Set<String>> { emptySet() }
 
 private val sharedLink = MutableStateFlow<String?>(null)
 
@@ -82,8 +96,18 @@ class MainActivity : ComponentActivity() {
                     primary = Accent,
                     background = Background,
                     surface = Background,
+                    onBackground = Color.White,
+                    onSurface = Color.White,
+                    onSurfaceVariant = Color.White,
+                    secondaryContainer = Raised,
+                    onSecondaryContainer = Color.White,
+                    surfaceContainer = Raised,
+                    surfaceContainerHigh = Raised,
                 ),
-            ) { App() }
+            ) {
+                // Sin esta superficie, los íconos sueltos heredan color negro y no se ven.
+                Surface(color = Background) { App() }
+            }
         }
     }
 
@@ -103,6 +127,10 @@ private fun App(model: PlayerModel = viewModel()) {
     val song = model.current
     val lifecycle = LocalLifecycleOwner.current
     val link by sharedLink.collectAsState()
+    val library by Library.data.collectAsState()
+    val inPlaylists = remember(library.playlists) {
+        library.playlists.flatMap { it.songs }.map { it.url }.toSet()
+    }
 
     LaunchedEffect(lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { model.trackPosition() }
@@ -113,12 +141,20 @@ private fun App(model: PlayerModel = viewModel()) {
             sharedLink.value = null
         }
     }
+    LaunchedEffect(model.collapseRequests) {
+        if (model.collapseRequests > 0) expanded = false
+    }
 
-    if (expanded && song != null) {
-        BackHandler { expanded = false }
-        FullPlayer(song, model) { expanded = false }
-    } else {
-        MainScreen(model) { expanded = true }
+    CompositionLocalProvider(
+        LocalPlayingUrl provides song?.mediaId,
+        LocalPlaylistUrls provides inPlaylists,
+    ) {
+        if (expanded && song != null) {
+            BackHandler { expanded = false }
+            FullPlayer(song, model) { expanded = false }
+        } else {
+            MainScreen(model) { expanded = true }
+        }
     }
 }
 
@@ -142,7 +178,10 @@ private fun MainScreen(model: PlayerModel, onExpand: () -> Unit) {
                     Tab.entries.forEach {
                         NavigationBarItem(
                             selected = tab == it,
-                            onClick = { tab = it },
+                            onClick = {
+                                tab = it
+                                model.closeDetails()
+                            },
                             icon = { Icon(painterResource(it.icon), null) },
                             label = { Text(it.label) },
                         )
@@ -153,10 +192,15 @@ private fun MainScreen(model: PlayerModel, onExpand: () -> Unit) {
     ) { padding ->
         Column(Modifier.padding(padding).padding(horizontal = 16.dp)) {
             if (reserve) Text("Modo reserva activo", color = Accent, modifier = Modifier.padding(vertical = 4.dp))
-            when (tab) {
-                Tab.HOME -> HomeTab(model)
-                Tab.SEARCH -> SearchTab(model)
-                Tab.LIBRARY -> LibraryTab(model)
+            if (model.detailOpen) {
+                BackHandler(onBack = model::closeDetail)
+                DetailScreen(model)
+            } else {
+                when (tab) {
+                    Tab.HOME -> HomeTab(model)
+                    Tab.SEARCH -> SearchTab(model)
+                    Tab.LIBRARY -> LibraryTab(model)
+                }
             }
         }
     }
@@ -170,6 +214,28 @@ internal fun SectionTitle(text: String, modifier: Modifier = Modifier) {
         fontWeight = FontWeight.Bold,
         modifier = modifier.padding(vertical = 12.dp),
     )
+}
+
+@Composable
+internal fun CoverCard(title: String, subtitle: String?, thumbnail: String?, url: String? = null, onClick: () -> Unit) {
+    Column(
+        Modifier
+            .padding(end = 12.dp)
+            .width(120.dp)
+            .clickable(onClick = onClick),
+    ) {
+        Artwork(thumbnail, 120.dp)
+        Text(
+            title,
+            color = if (url != null && url == LocalPlayingUrl.current) PlayingNow else Color.Unspecified,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+        subtitle?.let {
+            Text(it, color = Secondary, style = MaterialTheme.typography.bodySmall, maxLines = 1)
+        }
+    }
 }
 
 @Composable
@@ -191,20 +257,7 @@ private fun HomeTab(model: PlayerModel) {
             item {
                 LazyRow {
                     items(recent) { song ->
-                        Column(
-                            Modifier
-                                .padding(end = 12.dp)
-                                .width(120.dp)
-                                .clickable { model.play(song) },
-                        ) {
-                            Artwork(song.thumbnail, 120.dp)
-                            Text(
-                                song.title,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(top = 6.dp),
-                            )
-                        }
+                        CoverCard(song.title, null, song.thumbnail, song.url) { model.play(song) }
                     }
                 }
             }
@@ -216,11 +269,7 @@ private fun HomeTab(model: PlayerModel) {
                 TextButton(onClick = model::loadHome) { Text("Sin conexión. Reintentar") }
             }
         }
-        items(model.forYou) { song ->
-            SongRow(song.title, song.artist, song.thumbnail, trailing = { SongActions(song, model) }) {
-                model.play(song)
-            }
-        }
+        items(model.forYou) { song -> SongItem(song, model) }
     }
 }
 
@@ -248,16 +297,42 @@ private fun SearchTab(model: PlayerModel) {
             Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp))
         }
         LazyColumn {
+            if (model.artistResults.isNotEmpty()) {
+                item { SectionTitle("Artistas") }
+                item {
+                    LazyRow {
+                        items(model.artistResults) { artist ->
+                            CoverCard(artist.name, null, artist.thumbnail) { model.openArtist(artist.id) }
+                        }
+                    }
+                }
+                item { SectionTitle("Canciones") }
+            }
             items(model.results) { song ->
-                SongRow(
-                    song.title,
-                    "${song.artist} · ${time(song.seconds * 1000)}",
-                    song.thumbnail,
-                    trailing = { SongActions(song, model) },
-                ) { model.play(song) }
+                SongItem(song, model, "${song.artist} · ${time(song.seconds * 1000)}")
             }
         }
     }
+}
+
+/** Fila de canción completa: marca la que suena y desliza a la izquierda para la fila. */
+@Composable
+internal fun SongItem(
+    song: Song,
+    model: PlayerModel,
+    subtitle: String = song.artist,
+    trailing: @Composable () -> Unit = { SongActions(song, model) },
+    onClick: () -> Unit = { model.play(song) },
+) {
+    SongRow(
+        song.title,
+        subtitle,
+        song.thumbnail,
+        url = song.url,
+        trailing = trailing,
+        onSwipe = { model.addToQueue(song) },
+        onClick = onClick,
+    )
 }
 
 @Composable
@@ -265,17 +340,58 @@ internal fun SongRow(
     title: String,
     subtitle: String,
     artwork: Any?,
+    url: String? = null,
     trailing: @Composable (() -> Unit)? = null,
+    onSwipe: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
-    ListItem(
-        modifier = Modifier.clickable(onClick = onClick),
-        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-        leadingContent = { Artwork(artwork, 52.dp) },
-        trailingContent = trailing,
-        headlineContent = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        supportingContent = { Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+    val playing = url != null && url == LocalPlayingUrl.current
+    val inPlaylist = url != null && url in LocalPlaylistUrls.current
+    val textColor = if (playing) PlayingNow else Color.Unspecified
+    val row = @Composable {
+        ListItem(
+            modifier = Modifier.clickable(onClick = onClick),
+            colors = ListItemDefaults.colors(containerColor = Background, supportingColor = Secondary),
+            leadingContent = { Artwork(artwork, 52.dp) },
+            trailingContent = trailing,
+            headlineContent = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        title,
+                        color = textColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (inPlaylist) Text(" ♪", color = Accent)
+                }
+            },
+            supportingContent = {
+                Text(subtitle, color = textColor, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            },
+        )
+    }
+    if (onSwipe == null) row() else SwipeToQueue(onSwipe, row)
+}
+
+@Composable
+private fun SwipeToQueue(onSwipe: () -> Unit, content: @Composable () -> Unit) {
+    val action by rememberUpdatedState(onSwipe)
+    val state = rememberSwipeToDismissBoxState(
+        confirmValueChange = {
+            if (it == SwipeToDismissBoxValue.EndToStart) action()
+            false // la fila vuelve a su lugar: la canción no sale de la lista
+        },
     )
+    SwipeToDismissBox(
+        state = state,
+        enableDismissFromStartToEnd = false,
+        backgroundContent = {
+            Box(Modifier.fillMaxSize().padding(horizontal = 16.dp), Alignment.CenterEnd) {
+                Text("Agregar a la fila", color = Accent)
+            }
+        },
+    ) { content() }
 }
 
 @Composable
@@ -310,7 +426,7 @@ internal fun DownloadButton(song: Song, model: PlayerModel) {
         )
         DownloadStatus.WORKING -> CircularProgressIndicator(Modifier.padding(12.dp).size(24.dp))
         else -> IconButton(onClick = { model.download(song) }) {
-            Icon(painterResource(R.drawable.ic_download), "Descargar")
+            Icon(painterResource(R.drawable.ic_download), "Descargar", tint = Color.White)
         }
     }
 }
@@ -322,9 +438,23 @@ internal fun SongMenu(song: Song, model: PlayerModel) {
 
     Box {
         IconButton(onClick = { open = true }) {
-            Icon(painterResource(R.drawable.ic_more), "Más opciones")
+            Icon(painterResource(R.drawable.ic_more), "Más opciones", tint = Color.White)
         }
         DropdownMenu(open, { open = false }) {
+            DropdownMenuItem(
+                text = { Text("Agregar a la fila") },
+                onClick = {
+                    model.addToQueue(song)
+                    open = false
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Ver artista") },
+                onClick = {
+                    model.openArtistByName(song.artist)
+                    open = false
+                },
+            )
             DropdownMenuItem(
                 text = { Text(if (Library.isFavorite(song.url)) "Quitar de favoritos" else "Agregar a favoritos") },
                 onClick = {
@@ -387,14 +517,14 @@ private fun PlaylistPicker(song: Song, onClose: () -> Unit) {
 @Composable
 private fun MiniPlayer(song: MediaItem, model: PlayerModel, onExpand: () -> Unit) {
     val info = song.mediaMetadata
-    Surface(tonalElevation = 6.dp, modifier = Modifier.clickable(onClick = onExpand)) {
+    Surface(color = Background, modifier = Modifier.clickable(onClick = onExpand)) {
         Column {
             LinearProgressIndicator(
                 progress = { if (model.durationMs > 0) model.positionMs.toFloat() / model.durationMs else 0f },
                 modifier = Modifier.fillMaxWidth(),
             )
             ListItem(
-                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                colors = ListItemDefaults.colors(containerColor = Background, supportingColor = Secondary),
                 leadingContent = { Artwork(info.artworkUri, 48.dp) },
                 headlineContent = {
                     Text(info.title.toString(), maxLines = 1, overflow = TextOverflow.Ellipsis)
