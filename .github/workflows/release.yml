@@ -1,0 +1,84 @@
+name: Publicar version
+
+on:
+  schedule:
+    - cron: "17 9 * * *" # todos los dias
+  workflow_dispatch: # boton manual: publica aunque no haya novedades
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # GitHub apaga las tareas diarias de un proyecto sin actividad durante 60 dias.
+      - name: Mantener activo el proyecto
+        run: |
+          if [ $(( $(date +%s) - $(git log -1 --format=%ct) )) -gt 2592000 ]; then
+            git config user.name "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git commit --allow-empty -m "Mantener activo"
+            git push
+          fi
+
+      - name: Buscar arreglos de NewPipeExtractor
+        id: check
+        run: |
+          latest=$(gh api repos/TeamNewPipe/NewPipeExtractor/releases/latest --jq .tag_name)
+          published=$(gh release view --json body --jq .body 2>/dev/null || true)
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if [ "$latest" = "$published" ] && [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-java@v4
+        if: steps.check.outputs.build == 'true'
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Preparar la firma
+        if: steps.check.outputs.build == 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          echo "$SIGNING_KEY" | base64 -d > sy-release.jks
+          {
+            echo "storeFile=sy-release.jks"
+            echo "storePassword=$SIGNING_PASSWORD"
+            echo "keyAlias=sy"
+            echo "keyPassword=$SIGNING_PASSWORD"
+          } > keystore.properties
+
+      # Solo pruebas sin internet: YouTube suele bloquear los servidores de GitHub.
+      - name: Compilar
+        if: steps.check.outputs.build == 'true'
+        run: |
+          export VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          bash ./gradlew --no-daemon \
+            -PextractorVersion=${{ steps.check.outputs.latest }} \
+            :app:testDebugUnitTest \
+            --tests "*.backupCodeRestoresEverything" \
+            --tests "*.invalidBackupCodesAreRejected" \
+            --tests "*.mergeKeepsBothSidesWithoutDuplicates" \
+            --tests "*.tastesDriveForYou" \
+            --tests "*.parsesSyncedLyrics" \
+            --tests "*.songSurvivesSaving" \
+            --tests "*.updatesOnlyWhenNewer" \
+            :app:assembleRelease
+
+      - name: Publicar
+        if: steps.check.outputs.build == 'true'
+        run: |
+          gh release create "v$VERSION_CODE" app/build/outputs/apk/release/app-release.apk \
+            --title "SY 1.$VERSION_CODE" \
+            --notes "${{ steps.check.outputs.latest }}"
