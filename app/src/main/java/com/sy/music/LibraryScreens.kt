@@ -220,6 +220,7 @@ private fun DownloadsPage(model: PlayerModel) {
                 trailing = {
                     Row {
                         if (item.status == DownloadStatus.FAILED) DownloadButton(item.song, model)
+                        SongMenu(item.song, model)
                         IconButton(onClick = { model.removeDownload(item.song) }) {
                             Icon(painterResource(R.drawable.ic_delete), "Eliminar descarga")
                         }
