@@ -1,0 +1,172 @@
+package com.sy.music
+
+import android.app.Application
+import android.app.Notification
+import android.content.Context
+import android.util.Log
+import androidx.core.net.toUri
+import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.ResolvingDataSource
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.NoOpCacheEvictor
+import androidx.media3.datasource.cache.SimpleCache
+import androidx.media3.exoplayer.offline.Download
+import androidx.media3.exoplayer.offline.DownloadManager
+import androidx.media3.exoplayer.offline.DownloadNotificationHelper
+import androidx.media3.exoplayer.offline.DownloadRequest
+import androidx.media3.exoplayer.offline.DownloadService
+import androidx.media3.exoplayer.scheduler.Scheduler
+import kotlinx.coroutines.flow.MutableStateFlow
+import java.io.File
+import java.io.IOException
+import java.util.concurrent.Executors
+
+private const val BYTES_PER_GB = 1024L * 1024 * 1024
+private const val DEFAULT_CACHE_GB = 1
+private const val PREFS = "sy"
+private const val PREF_CACHE_GB = "cache_gb"
+private const val MAX_PARALLEL_DOWNLOADS = 2
+private const val CHANNEL_ID = "descargas"
+private const val NOTIFICATION_ID = 7
+private const val NOTIFICATION_INTERVAL_MS = 1000L
+
+enum class DownloadStatus { READY, WORKING, FAILED }
+
+data class SavedSong(val song: Song, val status: DownloadStatus)
+
+class SyApp : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        Library.init(this)
+        Storage.init(this)
+    }
+}
+
+/** Dos almacenes: las descargas nunca se borran solas; lo escuchado se recicla al llenarse. */
+object Storage {
+    val saved = MutableStateFlow(emptyList<SavedSong>())
+
+    lateinit var manager: DownloadManager
+        private set
+    lateinit var playbackSource: DataSource.Factory
+        private set
+
+    val readySongs get() = saved.value.filter { it.status == DownloadStatus.READY }.map { it.song }
+
+    fun init(context: Context) {
+        val database = StandaloneDatabaseProvider(context)
+        val downloads = SimpleCache(File(context.filesDir, "downloads"), NoOpCacheEvictor(), database)
+        val listened = SimpleCache(
+            File(context.cacheDir, "listened"),
+            LeastRecentlyUsedCacheEvictor(cacheLimitGb(context) * BYTES_PER_GB),
+            database,
+        )
+        val http = DefaultHttpDataSource.Factory().setUserAgent(YouTube.streamUserAgent)
+        // La URL real del audio caduca: se pide solo si hay que traer datos de YouTube.
+        val youtube = ResolvingDataSource.Factory(http) { spec ->
+            try {
+                spec.withUri(YouTube.streamUrl(spec.uri.toString()).toUri())
+            } catch (e: IOException) {
+                throw e
+            } catch (e: Exception) {
+                throw IOException(e)
+            }
+        }
+        val listenedSource = CacheDataSource.Factory()
+            .setCache(listened)
+            .setUpstreamDataSourceFactory(youtube)
+        playbackSource = CacheDataSource.Factory()
+            .setCache(downloads)
+            .setUpstreamDataSourceFactory(listenedSource)
+            .setCacheWriteDataSinkFactory(null) // reproducir no debe escribir en las descargas
+
+        manager = DownloadManager(
+            context,
+            database,
+            downloads,
+            youtube,
+            Executors.newFixedThreadPool(MAX_PARALLEL_DOWNLOADS),
+        ).apply {
+            maxParallelDownloads = MAX_PARALLEL_DOWNLOADS
+            addListener(object : DownloadManager.Listener {
+                override fun onInitialized(manager: DownloadManager) = refresh()
+
+                override fun onDownloadChanged(
+                    manager: DownloadManager,
+                    download: Download,
+                    finalException: Exception?,
+                ) = refresh()
+
+                override fun onDownloadRemoved(manager: DownloadManager, download: Download) = refresh()
+            })
+        }
+    }
+
+    fun cacheLimitGb(context: Context): Int =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(PREF_CACHE_GB, DEFAULT_CACHE_GB)
+
+    /** Se aplica la próxima vez que se abra la app. */
+    fun setCacheLimitGb(context: Context, gb: Int) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt(PREF_CACHE_GB, gb).apply()
+    }
+
+    fun download(context: Context, song: Song) {
+        val request = DownloadRequest.Builder(song.url, song.url.toUri())
+            .setData(song.toBytes())
+            .build()
+        DownloadService.sendAddDownload(context, SongDownloadService::class.java, request, false)
+    }
+
+    fun remove(context: Context, song: Song) {
+        DownloadService.sendRemoveDownload(context, SongDownloadService::class.java, song.url, false)
+    }
+
+    /** Descargas en curso, por URL de la canción. */
+    fun active() = manager.currentDownloads.associateBy { it.request.id }
+
+    fun isReady(url: String) = saved.value.any { it.song.url == url && it.status == DownloadStatus.READY }
+
+    private fun refresh() {
+        val found = mutableListOf<Pair<Long, SavedSong>>()
+        try {
+            manager.downloadIndex.getDownloads().use { cursor ->
+                while (cursor.moveToNext()) {
+                    val download = cursor.download
+                    val status = when (download.state) {
+                        Download.STATE_COMPLETED -> DownloadStatus.READY
+                        Download.STATE_FAILED -> DownloadStatus.FAILED
+                        Download.STATE_REMOVING -> continue
+                        else -> DownloadStatus.WORKING
+                    }
+                    found += download.startTimeMs to SavedSong(songFromBytes(download.request.data), status)
+                }
+            }
+        } catch (e: IOException) {
+            Log.w("SY", "No se pudo leer la lista de descargas", e)
+            return
+        }
+        saved.value = found.sortedByDescending { it.first }.map { it.second }
+    }
+}
+
+class SongDownloadService :
+    DownloadService(NOTIFICATION_ID, NOTIFICATION_INTERVAL_MS, CHANNEL_ID, R.string.downloads, 0) {
+    override fun getDownloadManager() = Storage.manager
+
+    override fun getScheduler(): Scheduler? = null
+
+    override fun getForegroundNotification(
+        downloads: MutableList<Download>,
+        notMetRequirements: Int,
+    ): Notification = DownloadNotificationHelper(this, CHANNEL_ID).buildProgressNotification(
+        this,
+        R.drawable.ic_download,
+        null,
+        null,
+        downloads,
+        notMetRequirements,
+    )
+}

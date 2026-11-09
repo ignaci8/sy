@@ -1,0 +1,9 @@
+subir-a-github/
+secreto-github/
+sy-release.jks
+keystore.properties
+local.properties
+.gradle/
+build/
+app/build/
+
