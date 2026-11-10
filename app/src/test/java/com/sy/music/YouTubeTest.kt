@@ -155,6 +155,15 @@ class YouTubeTest {
         val bytes = connection.inputStream.use { it.readNBytes(256 * 1024) }
         assertEquals(256 * 1024, bytes.size)
 
+        val low = YouTube.lowestAudio(song.url)
+        println("Calidad baja: ${low.format} ${low.averageBitrate} kbps")
+        assertTrue(low.averageBitrate in 1..80)
+        val lowConnection = URL(low.content).openConnection() as HttpURLConnection
+        lowConnection.setRequestProperty("User-Agent", YouTube.streamUserAgent)
+        lowConnection.setRequestProperty("Range", "bytes=0-")
+        assertEquals(206, lowConnection.responseCode)
+        assertTrue(lowConnection.inputStream.use { it.read() } >= 0)
+
         val radio = YouTube.radio(song.url)
         println("Radio: ${radio.size} canciones, ej: ${radio.drop(1).take(3).map { it.title }}")
         assertTrue(radio.size >= 5)

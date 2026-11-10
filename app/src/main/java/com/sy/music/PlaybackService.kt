@@ -11,7 +11,9 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
@@ -19,12 +21,15 @@ import androidx.media3.session.MediaSessionService
 import com.google.common.util.concurrent.Futures
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.schabi.newpipe.extractor.exceptions.ContentNotAvailableException
 import org.schabi.newpipe.extractor.exceptions.ExtractionException
+import java.io.IOException
 import kotlin.math.pow
 
 private const val MAX_CONSECUTIVE_ERRORS = 3
@@ -32,6 +37,21 @@ private const val RADIO_REFILL_THRESHOLD = 3
 private const val ENGINE_FAILURES_BEFORE_RESERVE = 2
 private const val HTTP_FORBIDDEN = 403
 private const val MIN_LISTEN_MS = 30_000L
+private const val BUFFER_MS = 120_000
+private const val START_BUFFER_MS = 1_500
+private const val RESUME_BUFFER_MS = 3_000
+private const val STALL_TO_LOW_MS = 6_000L
+private const val STALL_TO_DOWNLOADS_MS = 12_000L
+private const val OFFLINE_GRACE_MS = 1_500L
+private const val PRELOADED_SONGS = 3
+private const val PRELOAD_DELAY_MS = 1_000L
+private const val SAFE_BUFFER_MS = 20_000L
+private const val BUFFER_CHECK_MS = 1_000L
+private val NETWORK_ERRORS = setOf(
+    PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+)
 
 fun Song.toMediaItem(): MediaItem = MediaItem.Builder()
     .setMediaId(url)
@@ -63,9 +83,17 @@ class PlaybackService : MediaSessionService() {
     private var refilling = false
     private var errors = 0
     private var engineFailures = 0
+    private var soundedId: String? = null
+    private var stall: Job? = null
+    private var preload: Job? = null
+    private val playedOffline = mutableSetOf<String>()
 
     /** Escuchar más de 30 s o llegar al final cuenta como gusto; cambiar antes, como salto. */
     private val tasteListener = object : Player.Listener {
+        override fun onIsPlayingChanged(playing: Boolean) {
+            if (playing) soundedId = session.player.currentMediaItem?.mediaId
+        }
+
         override fun onPositionDiscontinuity(
             old: Player.PositionInfo,
             new: Player.PositionInfo,
@@ -74,7 +102,8 @@ class PlaybackService : MediaSessionService() {
             val item = old.mediaItem ?: return
             if (item.mediaId == new.mediaItem?.mediaId) return
             val played = reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION || old.positionMs >= MIN_LISTEN_MS
-            Library.record(item.toSong(), played)
+            // Una canción que no alcanzó a sonar por falta de internet no dice nada de tus gustos.
+            if (played || item.mediaId == soundedId) Library.record(item.toSong(), played)
         }
     }
 
@@ -82,6 +111,12 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
         exo = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(Storage.playbackSource))
+            // Dos minutos guardados aguantan las caídas; parte apenas tiene un poco de audio.
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(BUFFER_MS, BUFFER_MS, START_BUFFER_MS, RESUME_BUFFER_MS)
+                    .build(),
+            )
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
@@ -96,9 +131,22 @@ class PlaybackService : MediaSessionService() {
         exo.addListener(tasteListener)
         exo.addListener(object : Player.Listener {
             override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
+                if (item != null && Connection.unusable && !isAvailable(item) && playDownloadInstead()) return
                 refillRadio()
                 if (item != null) applyExtras(item)
+                preloadUpcoming()
             }
+
+            override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+                if (reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED) preloadUpcoming()
+            }
+
+            override fun onPlaybackStateChanged(state: Int) {
+                watchStall()
+                if (state == Player.STATE_BUFFERING) preloadUpcoming() // primero la canción actual
+            }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = watchStall()
 
             override fun onIsPlayingChanged(playing: Boolean) {
                 if (playing) {
@@ -125,17 +173,117 @@ class PlaybackService : MediaSessionService() {
                     controller: MediaSession.ControllerInfo,
                     items: MutableList<MediaItem>,
                 ) = Futures.immediateFuture(
-                    items.map { it.buildUpon().setUri(it.mediaId).build() }.toMutableList(),
+                    items.map { it.buildUpon().setUri(Storage.uriFor(it.mediaId)).build() }.toMutableList(),
                 )
             })
             .build()
+
+        scope.launch {
+            Connection.online.collect { online ->
+                if (online && exo.playerError != null) exo.prepare()
+                preloadUpcoming()
+            }
+        }
+    }
+
+    private fun isAvailable(item: MediaItem) = Storage.isAvailable(item.localConfiguration?.uri.toString())
+
+    /** Si la canción se traba: primero calidad baja en el mismo segundo; si no alcanza, una descarga. */
+    private fun watchStall() {
+        if (exo.playbackState != Player.STATE_BUFFERING || !exo.playWhenReady) {
+            stall?.cancel()
+            return
+        }
+        if (stall?.isActive == true) return
+        stall = scope.launch {
+            if (exo.currentMediaItem?.let(::isAvailable) != false) return@launch
+            if (Connection.online.value) {
+                delay(STALL_TO_LOW_MS)
+                Connection.reportSlow()
+                useLowQualityNow()
+                delay(STALL_TO_DOWNLOADS_MS)
+            } else {
+                delay(OFFLINE_GRACE_MS)
+            }
+            Connection.reportUnusable()
+            playDownloadInstead()
+        }
+    }
+
+    private fun useLowQualityNow() {
+        val item = exo.currentMediaItem ?: return
+        val uri = Storage.uriFor(item.mediaId)
+        if (item.localConfiguration?.uri.toString() == uri) return
+        val index = exo.currentMediaItemIndex
+        val position = exo.currentPosition
+        exo.replaceMediaItem(index, item.buildUpon().setUri(uri).build())
+        exo.seekTo(index, position)
+    }
+
+    /** Pone una descarga antes de la canción que no carga: tu fila sigue igual cuando vuelva internet. */
+    private fun playDownloadInstead(): Boolean {
+        val current = exo.currentMediaItem?.mediaId
+        val ready = Storage.readySongs.filter { it.url != current }
+        if (ready.isEmpty()) return false
+        val song = ready.filter { it.url !in playedOffline }
+            .ifEmpty {
+                playedOffline.clear()
+                ready
+            }
+            .random()
+        playedOffline += song.url
+        val index = exo.currentMediaItemIndex
+        exo.addMediaItem(index, song.toMediaItem())
+        exo.seekTo(index, 0)
+        return true
+    }
+
+    private fun upcomingIndexes(): List<Int> {
+        val timeline = exo.currentTimeline
+        if (timeline.isEmpty) return emptyList()
+        return generateSequence(exo.currentMediaItemIndex) {
+            timeline.getNextWindowIndex(it, Player.REPEAT_MODE_OFF, exo.shuffleModeEnabled)
+                .takeIf { next -> next != C.INDEX_UNSET }
+        }.drop(1).take(PRELOADED_SONGS).toList()
+    }
+
+    /** Guarda las próximas canciones de a una, solo si la actual ya tiene suficiente audio cargado. */
+    private fun preloadUpcoming() {
+        preload?.cancel()
+        Storage.cancelPreload()
+        if (session.player !== exo) return
+        preload = scope.launch {
+            delay(PRELOAD_DELAY_MS) // varios cambios seguidos cuentan como uno
+            upcomingIndexes().forEach { index ->
+                val item = exo.getMediaItemAt(index)
+                val uri = Storage.uriFor(item.mediaId)
+                if (item.localConfiguration?.uri.toString() != uri) {
+                    exo.replaceMediaItem(index, item.buildUpon().setUri(uri).build())
+                }
+            }
+            upcomingIndexes().map { exo.getMediaItemAt(it).localConfiguration?.uri.toString() }.forEach { uri ->
+                while (exo.totalBufferedDuration < SAFE_BUFFER_MS && exo.bufferedPercentage < 100) {
+                    if (exo.playbackState == Player.STATE_IDLE) return@launch
+                    delay(BUFFER_CHECK_MS)
+                }
+                if (!Connection.online.value) return@launch
+                withContext(Dispatchers.IO) {
+                    try {
+                        Storage.preload(uri)
+                    } catch (e: IOException) {
+                        Log.i("SY", "No se pudo precargar", e)
+                    }
+                }
+            }
+        }
     }
 
     /** Volumen parejo y saltar partes sin música; si fallan, la canción suena normal. */
     private fun applyExtras(item: MediaItem) {
         scope.launch {
             try {
-                val loudness = withContext(Dispatchers.IO) { YouTubeWeb.loudnessDb(item.mediaId) }
+                // Con internet malo no se gasta en bajar la página completa del video.
+                val loudness = if (Connection.slow) null else withContext(Dispatchers.IO) { YouTubeWeb.loudnessDb(item.mediaId) }
                 // Como YouTube: solo se baja lo que suena más fuerte que la referencia.
                 if (exo.currentMediaItem == item) {
                     exo.volume = if (loudness != null && loudness > 0) 10.0.pow(-loudness / 20).toFloat() else 1f
@@ -179,6 +327,9 @@ class PlaybackService : MediaSessionService() {
             } else {
                 exo.prepare()
             }
+        } else if (error.errorCode in NETWORK_ERRORS && playDownloadInstead()) {
+            Connection.reportUnusable()
+            exo.prepare()
         } else if (++errors < MAX_CONSECUTIVE_ERRORS && exo.hasNextMediaItem()) {
             exo.seekToNextMediaItem()
             exo.prepare()
@@ -288,6 +439,7 @@ class PlaybackService : MediaSessionService() {
 
     override fun onDestroy() {
         scope.cancel()
+        Storage.cancelPreload()
         session.release()
         exo.release()
         reservePlayer?.release()

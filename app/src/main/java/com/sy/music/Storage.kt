@@ -7,9 +7,12 @@ import android.util.Log
 import androidx.core.net.toUri
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.CacheWriter
+import androidx.media3.datasource.cache.ContentMetadata
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
@@ -32,6 +35,7 @@ private const val MAX_PARALLEL_DOWNLOADS = 2
 private const val CHANNEL_ID = "descargas"
 private const val NOTIFICATION_ID = 7
 private const val NOTIFICATION_INTERVAL_MS = 1000L
+private const val LOW_QUALITY = "#low"
 
 enum class DownloadStatus { READY, WORKING, FAILED }
 
@@ -41,6 +45,7 @@ class SyApp : Application() {
     override fun onCreate() {
         super.onCreate()
         Library.init(this)
+        Connection.init(this)
         Storage.init(this)
     }
 }
@@ -54,12 +59,17 @@ object Storage {
     lateinit var playbackSource: DataSource.Factory
         private set
 
+    private lateinit var listened: SimpleCache
+    private lateinit var listenedSource: CacheDataSource.Factory
+
+    @Volatile private var preloading: CacheWriter? = null
+
     val readySongs get() = saved.value.filter { it.status == DownloadStatus.READY }.map { it.song }
 
     fun init(context: Context) {
         val database = StandaloneDatabaseProvider(context)
         val downloads = SimpleCache(File(context.filesDir, "downloads"), NoOpCacheEvictor(), database)
-        val listened = SimpleCache(
+        listened = SimpleCache(
             File(context.cacheDir, "listened"),
             LeastRecentlyUsedCacheEvictor(cacheLimitGb(context) * BYTES_PER_GB),
             database,
@@ -68,14 +78,15 @@ object Storage {
         // La URL real del audio caduca: se pide solo si hay que traer datos de YouTube.
         val youtube = ResolvingDataSource.Factory(http) { spec ->
             try {
-                spec.withUri(YouTube.streamUrl(spec.uri.toString()).toUri())
+                val uri = spec.uri.toString()
+                spec.withUri(YouTube.streamUrl(uri.removeSuffix(LOW_QUALITY), uri.endsWith(LOW_QUALITY)).toUri())
             } catch (e: IOException) {
                 throw e
             } catch (e: Exception) {
                 throw IOException(e)
             }
         }
-        val listenedSource = CacheDataSource.Factory()
+        listenedSource = CacheDataSource.Factory()
             .setCache(listened)
             .setUpstreamDataSourceFactory(youtube)
         playbackSource = CacheDataSource.Factory()
@@ -128,6 +139,28 @@ object Storage {
     fun active() = manager.currentDownloads.associateBy { it.request.id }
 
     fun isReady(url: String) = saved.value.any { it.song.url == url && it.status == DownloadStatus.READY }
+
+    /** La dirección marca la calidad, así los dos archivos de una canción no se mezclan en el caché. */
+    fun uriFor(url: String) = if (!isAvailable(url) && Connection.slow) url + LOW_QUALITY else url
+
+    /** Si la canción completa se puede escuchar sin internet. */
+    fun isAvailable(uri: String): Boolean {
+        if (isReady(uri)) return true
+        val length = ContentMetadata.getContentLength(listened.getContentMetadata(uri))
+        return length > 0 && listened.isCached(uri, 0, length)
+    }
+
+    /** Guarda la canción en lo escuchado. Bloquea hasta terminar, fallar o cancelarse. */
+    fun preload(uri: String) {
+        if (isAvailable(uri)) return
+        val writer = CacheWriter(listenedSource.createDataSource(), DataSpec(uri.toUri()), null, null)
+        preloading = writer
+        writer.cache()
+    }
+
+    fun cancelPreload() {
+        preloading?.cancel()
+    }
 
     private fun refresh() {
         val found = mutableListOf<Pair<Long, SavedSong>>()

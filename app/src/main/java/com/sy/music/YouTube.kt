@@ -57,7 +57,9 @@ object YouTube {
     // shortcut: vida fija de 1 h, YouTube da unas 6 h; leer el parámetro expire si hiciera falta.
     private const val URL_LIFETIME_MS = 3_600_000L
     private const val MAX_PLAYLIST_SONGS = 500
-    private val urls = ConcurrentHashMap<String, Pair<String, Long>>()
+    private class StreamUrls(val best: String, val low: String, val savedAt: Long)
+
+    private val urls = ConcurrentHashMap<String, StreamUrls>()
 
     private val http = OkHttpClient.Builder().readTimeout(30, TimeUnit.SECONDS).build()
 
@@ -87,10 +89,12 @@ object YouTube {
         return extractor.initialPage.items.filterIsInstance<StreamInfoItem>().map(::toSong)
     }
 
-    fun streamUrl(songUrl: String): String {
+    fun streamUrl(songUrl: String, low: Boolean = false): String {
         val now = System.currentTimeMillis()
-        urls[songUrl]?.takeIf { now - it.second < URL_LIFETIME_MS }?.let { return it.first }
-        return bestAudio(songUrl).content.also { urls[songUrl] = it to now }
+        val stream = urls[songUrl]?.takeIf { now - it.savedAt < URL_LIFETIME_MS }
+            ?: audioStreams(songUrl).let { StreamUrls(best(it).content, lowest(it).content, now) }
+                .also { urls[songUrl] = it }
+        return if (low) stream.low else stream.best
     }
 
     fun isPlaylistLink(link: String) =
@@ -135,16 +139,26 @@ object YouTube {
             ?.replace(Regex("=w\\d+-h\\d+"), "=w800-h800"),
     )
 
-    fun bestAudio(songUrl: String): AudioStream =
+    fun bestAudio(songUrl: String): AudioStream = best(audioStreams(songUrl))
+
+    fun lowestAudio(songUrl: String): AudioStream = lowest(audioStreams(songUrl))
+
+    private fun audioStreams(songUrl: String) =
         StreamInfo.getInfo(ServiceList.YouTube, songUrl).audioStreams
             .filter { it.isUrl && it.deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP }
-            // El idioma original gana a un doblaje aunque el doblaje tenga más bitrate.
-            .maxWithOrNull(
-                compareBy(
-                    { it.audioTrackType == null || it.audioTrackType == AudioTrackType.ORIGINAL },
-                    { it.averageBitrate },
-                ),
-            ) ?: throw ExtractionException("YouTube no entregó audio para esta canción")
+
+    private fun isOriginal(stream: AudioStream) =
+        stream.audioTrackType == null || stream.audioTrackType == AudioTrackType.ORIGINAL
+
+    // El idioma original gana a un doblaje aunque el doblaje tenga más bitrate.
+    private fun best(streams: List<AudioStream>) =
+        streams.maxWithOrNull(compareBy(::isOriginal, { it.averageBitrate }))
+            ?: throw ExtractionException("YouTube no entregó audio para esta canción")
+
+    private fun lowest(streams: List<AudioStream>): AudioStream {
+        val original = streams.filter(::isOriginal).ifEmpty { streams }
+        return original.filter { it.averageBitrate > 0 }.minByOrNull { it.averageBitrate } ?: best(streams)
+    }
 
     private object OkHttpDownloader : Downloader() {
         override fun execute(request: Request): Response {
