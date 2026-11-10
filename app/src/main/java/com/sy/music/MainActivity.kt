@@ -67,11 +67,13 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.MediaItem
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 
 internal val Background = Color.Black
@@ -92,6 +94,14 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         receiveShare(intent)
+        // Tras actualizar o cerrar la app, las descargas a medias necesitan su servicio para avanzar.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                Storage.saved.collect { saved ->
+                    if (saved.any { it.status == DownloadStatus.WORKING }) Storage.resumeDownloads(this@MainActivity)
+                }
+            }
+        }
         setContent {
             MaterialTheme(
                 colorScheme = darkColorScheme(

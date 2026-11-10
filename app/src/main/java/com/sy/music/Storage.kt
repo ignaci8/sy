@@ -3,6 +3,9 @@ package com.sy.music
 import android.app.Application
 import android.app.Notification
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.net.toUri
 import androidx.media3.database.StandaloneDatabaseProvider
@@ -36,6 +39,9 @@ private const val CHANNEL_ID = "descargas"
 private const val NOTIFICATION_ID = 7
 private const val NOTIFICATION_INTERVAL_MS = 1000L
 private const val LOW_QUALITY = "#low"
+private const val STUCK_CHECK_MS = 30_000L
+private const val STUCK_AFTER_MS = 60_000L
+private const val RESTART_STOP_REASON = 1
 
 enum class DownloadStatus { READY, WORKING, FAILED }
 
@@ -63,6 +69,15 @@ object Storage {
     private lateinit var listenedSource: CacheDataSource.Factory
 
     @Volatile private var preloading: CacheWriter? = null
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val lastProgress = mutableMapOf<String, Pair<Long, Long>>() // bytes y desde cuándo
+    private val watchStuck = object : Runnable {
+        override fun run() {
+            restartStuck()
+            handler.postDelayed(this, STUCK_CHECK_MS)
+        }
+    }
 
     val readySongs get() = saved.value.filter { it.status == DownloadStatus.READY }.map { it.song }
 
@@ -114,6 +129,7 @@ object Storage {
                 override fun onDownloadRemoved(manager: DownloadManager, download: Download) = refresh()
             })
         }
+        handler.postDelayed(watchStuck, STUCK_CHECK_MS)
     }
 
     fun cacheLimitGb(context: Context): Int =
@@ -129,6 +145,34 @@ object Storage {
             .setData(song.toBytes())
             .build()
         DownloadService.sendAddDownload(context, SongDownloadService::class.java, request, false)
+    }
+
+    fun resumeDownloads(context: Context) {
+        try {
+            DownloadService.start(context, SongDownloadService::class.java)
+        } catch (e: IllegalStateException) {
+            Log.w("SY", "Android no dejó encender las descargas", e) // la app ya no estaba a la vista
+        }
+    }
+
+    /** Una descarga que no avanza en un minuto se reinicia con un enlace nuevo, desde donde iba. */
+    private fun restartStuck() {
+        val now = SystemClock.elapsedRealtime()
+        val downloading = manager.currentDownloads.filter { it.state == Download.STATE_DOWNLOADING }
+        lastProgress.keys.retainAll(downloading.map { it.request.id }.toSet())
+        downloading.forEach { download ->
+            val id = download.request.id
+            val (bytes, since) = lastProgress[id] ?: (-1L to now)
+            if (download.bytesDownloaded != bytes) {
+                lastProgress[id] = download.bytesDownloaded to now
+            } else if (now - since >= STUCK_AFTER_MS) {
+                Log.w("SY", "Descarga atascada, se reinicia: $id")
+                lastProgress.remove(id)
+                YouTube.forget(id)
+                manager.setStopReason(id, RESTART_STOP_REASON)
+                manager.setStopReason(id, Download.STOP_REASON_NONE)
+            }
+        }
     }
 
     fun remove(context: Context, song: Song) {
