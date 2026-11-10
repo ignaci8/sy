@@ -29,6 +29,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.schabi.newpipe.extractor.exceptions.ContentNotAvailableException
 import org.schabi.newpipe.extractor.exceptions.ExtractionException
+import org.json.JSONArray
 import java.io.IOException
 import kotlin.math.pow
 
@@ -47,6 +48,12 @@ private const val PRELOADED_SONGS = 3
 private const val PRELOAD_DELAY_MS = 1_000L
 private const val SAFE_BUFFER_MS = 20_000L
 private const val BUFFER_CHECK_MS = 1_000L
+private const val SAVE_POSITION_MS = 10_000L
+private const val MAX_SAVED_SONGS = 100
+private const val LAST_SESSION = "ultima_sesion"
+private const val SAVED_QUEUE = "fila"
+private const val SAVED_POSITION = "segundo"
+private const val SAVED_SHUFFLE = "aleatorio"
 private val NETWORK_ERRORS = setOf(
     PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
@@ -178,12 +185,72 @@ class PlaybackService : MediaSessionService() {
             })
             .build()
 
+        restoreLastSession()
+        exo.addListener(object : Player.Listener {
+            override fun onMediaItemTransition(item: MediaItem?, reason: Int) = saveQueue()
+
+            override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+                if (reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED) saveQueue()
+            }
+
+            override fun onIsPlayingChanged(playing: Boolean) = savePosition()
+
+            override fun onPositionDiscontinuity(
+                old: Player.PositionInfo,
+                new: Player.PositionInfo,
+                reason: Int,
+            ) = savePosition()
+        })
+        scope.launch {
+            while (true) {
+                delay(SAVE_POSITION_MS)
+                if (session.player.isPlaying) savePosition()
+            }
+        }
         scope.launch {
             Connection.online.collect { online ->
                 if (online && exo.playerError != null) exo.prepare()
                 preloadUpcoming()
             }
         }
+    }
+
+    private val saved by lazy { getSharedPreferences(LAST_SESSION, MODE_PRIVATE) }
+
+    /** Desde la canción actual en adelante: así lo guardado es poco y no pesa. */
+    private fun saveQueue() {
+        val player = session.player
+        if (player.mediaItemCount == 0) return // al pasar al motor de reserva la fila se vacía un instante
+        val songs = JSONArray()
+        val from = player.currentMediaItemIndex
+        for (i in from until minOf(player.mediaItemCount, from + MAX_SAVED_SONGS)) {
+            songs.put(player.getMediaItemAt(i).toSong().toJson())
+        }
+        saved.edit().putString(SAVED_QUEUE, songs.toString()).putBoolean(SAVED_SHUFFLE, player.shuffleModeEnabled).apply()
+        savePosition()
+    }
+
+    private fun savePosition() {
+        saved.edit().putLong(SAVED_POSITION, session.player.currentPosition).apply()
+    }
+
+    /** Al abrir de nuevo, la última canción queda en pausa en el segundo donde quedó. */
+    private fun restoreLastSession() {
+        val songs = try {
+            val list = JSONArray(saved.getString(SAVED_QUEUE, null) ?: return)
+            (0 until list.length()).map { songFromJson(list.getJSONObject(it)) }
+        } catch (e: org.json.JSONException) {
+            Log.w("SY", "No se pudo leer la última canción", e)
+            return
+        }
+        if (songs.isEmpty()) return
+        exo.setMediaItems(
+            songs.map { it.toMediaItem().buildUpon().setUri(Storage.uriFor(it.url)).build() },
+            0,
+            saved.getLong(SAVED_POSITION, 0),
+        )
+        exo.shuffleModeEnabled = saved.getBoolean(SAVED_SHUFFLE, false)
+        exo.prepare()
     }
 
     private fun isAvailable(item: MediaItem) = Storage.isAvailable(item.localConfiguration?.uri.toString())
@@ -438,6 +505,7 @@ class PlaybackService : MediaSessionService() {
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo) = session
 
     override fun onDestroy() {
+        if (session.player.mediaItemCount > 0) savePosition()
         scope.cancel()
         Storage.cancelPreload()
         session.release()

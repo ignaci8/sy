@@ -74,11 +74,18 @@ import androidx.media3.common.MediaItem
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.random.Random
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import kotlinx.coroutines.flow.MutableStateFlow
 
 internal val Background = Color.Black
 internal val Accent = Color(0xFF8AB4FF)
-private val PlayingNow = Accent
 private const val DOWNLOAD_PROGRESS_MS = 500L
 private val Secondary = Color.White.copy(alpha = 0.7f)
 private val Raised = Color(0xFF1C1C1E)
@@ -86,6 +93,7 @@ private val SMALL_ARTWORK = 80.dp
 
 internal val LocalPlayingUrl = compositionLocalOf<String?> { null }
 internal val LocalPlaylistUrls = compositionLocalOf<Set<String>> { emptySet() }
+internal val LocalIsPlaying = compositionLocalOf { false }
 
 private val sharedLink = MutableStateFlow<String?>(null)
 
@@ -159,6 +167,7 @@ private fun App(model: PlayerModel = viewModel()) {
 
     CompositionLocalProvider(
         LocalPlayingUrl provides song?.mediaId,
+        LocalIsPlaying provides model.isPlaying,
         LocalPlaylistUrls provides inPlaylists,
     ) {
         if (expanded && song != null) {
@@ -236,10 +245,12 @@ internal fun CoverCard(title: String, subtitle: String?, thumbnail: String?, url
             .width(120.dp)
             .clickable(onClick = onClick),
     ) {
-        Artwork(thumbnail, 120.dp)
+        val playing = url != null && url == LocalPlayingUrl.current
+        ListArtwork(thumbnail, 120.dp, playing)
         Text(
             title,
-            color = if (url != null && url == LocalPlayingUrl.current) PlayingNow else Color.Unspecified,
+            color = if (playing) Color.White else Color.Unspecified,
+            fontWeight = if (playing) FontWeight.Bold else null,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(top = 6.dp),
@@ -359,18 +370,18 @@ internal fun SongRow(
 ) {
     val playing = url != null && url == LocalPlayingUrl.current
     val inPlaylist = url != null && url in LocalPlaylistUrls.current
-    val textColor = if (playing) PlayingNow else Color.Unspecified
     val row = @Composable {
         ListItem(
             modifier = Modifier.clickable(onClick = onClick),
             colors = ListItemDefaults.colors(containerColor = Background, supportingColor = Secondary),
-            leadingContent = { Artwork(artwork, 52.dp) },
+            leadingContent = { ListArtwork(artwork, 52.dp, playing) },
             trailingContent = trailing,
             headlineContent = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         title,
-                        color = textColor,
+                        color = if (playing) Color.White else Color.Unspecified,
+                        fontWeight = if (playing) FontWeight.Bold else null,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false),
@@ -379,7 +390,7 @@ internal fun SongRow(
                 }
             },
             supportingContent = {
-                Text(subtitle, color = textColor, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
             },
         )
     }
@@ -408,6 +419,39 @@ private fun SwipeToQueue(onSwipe: () -> Unit, content: @Composable () -> Unit) {
             }
         },
     ) { content() }
+}
+
+@Composable
+internal fun ListArtwork(model: Any?, size: Dp, playing: Boolean) {
+    if (!playing) return Artwork(model, size)
+    Box(contentAlignment = Alignment.Center) {
+        Artwork(model, size)
+        Box(Modifier.size(size).clip(RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = 0.45f)))
+        PlayingBars(LocalIsPlaying.current, Modifier.size(size * 0.36f))
+    }
+}
+
+/** Tres barras como onda de música; en pausa se quedan quietas. Solo se redibujan, no recomponen. */
+@Composable
+private fun PlayingBars(moving: Boolean, modifier: Modifier) {
+    val bars = remember { List(3) { Animatable(0.4f + it * 0.2f) } }
+    bars.forEachIndexed { i, bar ->
+        LaunchedEffect(moving) {
+            while (moving) bar.animateTo(0.25f + Random.nextFloat() * 0.75f, tween(220 + i * 60))
+        }
+    }
+    Canvas(modifier) {
+        val width = size.width / 5
+        bars.forEachIndexed { i, bar ->
+            val height = size.height * bar.value
+            drawRoundRect(
+                Color.White,
+                topLeft = Offset(i * 2 * width, size.height - height),
+                size = Size(width, height),
+                cornerRadius = CornerRadius(width / 2),
+            )
+        }
+    }
 }
 
 @Composable

@@ -43,6 +43,7 @@ import androidx.media3.common.MediaItem
 import coil.compose.AsyncImage
 
 private val Faded = Color.White.copy(alpha = 0.7f)
+private val LyricWaiting = Color(0xFF6E6E6E)
 
 @Composable
 internal fun FullPlayer(song: MediaItem, model: PlayerModel, onClose: () -> Unit) {
@@ -189,12 +190,16 @@ private fun Lyrics(model: PlayerModel) {
         } else {
             LazyColumn(Modifier.fillMaxSize(), list) {
                 itemsIndexed(lines) { i, line ->
+                    // Solo las letras con tiempos avanzan con la canción y se pueden tocar para saltar.
                     Text(
                         line.text,
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
-                        color = if (i == active || !line.synced) Color.White else Color.White.copy(alpha = 0.4f),
-                        modifier = Modifier.padding(vertical = 8.dp),
+                        color = if (i == active || !line.synced) Color.White else LyricWaiting,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .then(if (line.synced) Modifier.clickable { model.seekTo(line.ms) } else Modifier)
+                            .padding(vertical = 8.dp),
                     )
                 }
             }
