@@ -71,11 +71,13 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.MediaItem
 import coil.compose.AsyncImage
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 
 internal val Background = Color.Black
 internal val Accent = Color(0xFF8AB4FF)
-private val PlayingNow = Color(0xFFFF3B30)
+private val PlayingNow = Accent
+private const val DOWNLOAD_PROGRESS_MS = 500L
 private val Secondary = Color.White.copy(alpha = 0.7f)
 private val Raised = Color(0xFF1C1C1E)
 private val SMALL_ARTWORK = 80.dp
@@ -428,7 +430,22 @@ internal fun DownloadButton(song: Song, model: PlayerModel) {
             tint = Accent,
             modifier = Modifier.padding(12.dp),
         )
-        DownloadStatus.WORKING -> CircularProgressIndicator(Modifier.padding(12.dp).size(24.dp))
+        DownloadStatus.WORKING -> {
+            // El círculo se va llenando con el avance real de la descarga.
+            var percent by remember { mutableStateOf(0f) }
+            LaunchedEffect(song.url) {
+                while (true) {
+                    percent = Storage.active()[song.url]?.percentDownloaded?.coerceIn(0f, 100f) ?: percent
+                    delay(DOWNLOAD_PROGRESS_MS)
+                }
+            }
+            CircularProgressIndicator(
+                progress = { percent / 100f },
+                modifier = Modifier.padding(12.dp).size(24.dp),
+                color = Accent,
+                trackColor = Color.White.copy(alpha = 0.25f),
+            )
+        }
         else -> IconButton(onClick = { model.download(song) }) {
             Icon(painterResource(R.drawable.ic_download), "Descargar", tint = Color.White)
         }
