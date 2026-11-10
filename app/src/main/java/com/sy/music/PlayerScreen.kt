@@ -128,27 +128,29 @@ internal fun FullPlayer(song: MediaItem, model: PlayerModel, onClose: () -> Unit
                     Text(time(model.positionMs), color = Faded)
                     Text(time(model.durationMs), color = Faded)
                 }
-                Row(
-                    Modifier.fillMaxWidth().padding(vertical = 12.dp),
-                    Arrangement.SpaceEvenly,
-                    Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = model::toggleShuffle) {
+                androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
+                    IconButton(onClick = model::toggleShuffle, modifier = Modifier.align(Alignment.CenterStart)) {
                         Icon(
                             painterResource(R.drawable.ic_shuffle),
                             if (model.shuffle) "Desactivar aleatorio" else "Activar aleatorio",
                             tint = if (model.shuffle) Accent else Color.White,
                         )
                     }
-                    IconButton(onClick = model::previous) {
-                        Icon(painterResource(R.drawable.ic_previous), "Anterior", tint = Color.White)
-                    }
-                    FilledIconButton(onClick = model::togglePlay, modifier = Modifier.size(64.dp)) {
-                        if (model.buffering) CircularProgressIndicator(Modifier.size(28.dp))
-                        else PlayPauseIcon(model.isPlaying)
-                    }
-                    IconButton(onClick = model::next) {
-                        Icon(painterResource(R.drawable.ic_next), "Siguiente", tint = Color.White)
+                    Row(
+                        Modifier.align(Alignment.Center),
+                        Arrangement.spacedBy(24.dp),
+                        Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = model::previous) {
+                            Icon(painterResource(R.drawable.ic_previous), "Anterior", tint = Color.White)
+                        }
+                        FilledIconButton(onClick = model::togglePlay, modifier = Modifier.size(64.dp)) {
+                            if (model.buffering) CircularProgressIndicator(Modifier.size(28.dp))
+                            else PlayPauseIcon(model.isPlaying)
+                        }
+                        IconButton(onClick = model::next) {
+                            Icon(painterResource(R.drawable.ic_next), "Siguiente", tint = Color.White)
+                        }
                     }
                 }
                 model.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }

@@ -379,15 +379,19 @@ private fun SwipeToQueue(onSwipe: () -> Unit, content: @Composable () -> Unit) {
     val action by rememberUpdatedState(onSwipe)
     val state = rememberSwipeToDismissBoxState(
         confirmValueChange = {
-            if (it == SwipeToDismissBoxValue.EndToStart) action()
+            if (it != SwipeToDismissBoxValue.Settled) action()
             false // la fila vuelve a su lugar: la canción no sale de la lista
         },
     )
     SwipeToDismissBox(
         state = state,
-        enableDismissFromStartToEnd = false,
         backgroundContent = {
-            Box(Modifier.fillMaxSize().padding(horizontal = 16.dp), Alignment.CenterEnd) {
+            val side = if (state.dismissDirection == SwipeToDismissBoxValue.StartToEnd) {
+                Alignment.CenterStart
+            } else {
+                Alignment.CenterEnd
+            }
+            Box(Modifier.fillMaxSize().padding(horizontal = 16.dp), side) {
                 Text("Agregar a la fila", color = Accent)
             }
         },
