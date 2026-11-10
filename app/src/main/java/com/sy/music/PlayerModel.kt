@@ -57,8 +57,11 @@ class PlayerModel(app: Application) : AndroidViewModel(app) {
         private set
     var detailLoading by mutableStateOf(false)
         private set
-    /** Las del artista abierto, de la más nueva a la más antigua, y aparte donde es invitado. */
-    var recent by mutableStateOf<Pair<List<Song>, List<Song>>?>(null)
+    /** Las del artista abierto, de la más nueva a la más antigua. */
+    var recent by mutableStateOf<List<Song>?>(null)
+        private set
+    /** Canciones de otros donde participa; vacía si YouTube no encontró ninguna. */
+    var guests by mutableStateOf(emptyList<Song>())
         private set
     var recentLoading by mutableStateOf(false)
         private set
@@ -246,12 +249,26 @@ class PlayerModel(app: Application) : AndroidViewModel(app) {
     fun openArtist(id: String) = loadDetail {
         album = null
         artist = withContext(Dispatchers.IO) { YouTubeMusic.artist(id) }
+        loadGuests()
     }
 
     fun openArtistByName(name: String) = loadDetail {
         album = null
         artist = withContext(Dispatchers.IO) { YouTubeMusic.artistFromName(name) }
-        if (artist == null) toast("No encontré ese artista")
+        if (artist == null) toast("No encontré ese artista") else loadGuests()
+    }
+
+    /** Se busca al abrir el artista para saber si mostrar "Como invitado". */
+    private fun loadGuests() {
+        val page = artist ?: return
+        guests = emptyList()
+        viewModelScope.launch {
+            val found = withContext(Dispatchers.IO) {
+                runCatching { YouTubeMusic.guestSongs(page, page.topSongs.map { it.url }.toSet()) }
+                    .getOrDefault(emptyList())
+            }
+            if (artist?.id == page.id) guests = found
+        }
     }
 
     /** "Más recientes" pide varios álbumes: solo se carga si lo eligen. */
@@ -263,11 +280,7 @@ class PlayerModel(app: Application) : AndroidViewModel(app) {
         recentLoading = true
         viewModelScope.launch {
             try {
-                val found = withContext(Dispatchers.IO) {
-                    val own = YouTubeMusic.recentSongs(page)
-                    val known = (own + page.topSongs).map { it.url }.toSet()
-                    own to runCatching { YouTubeMusic.guestSongs(page, known) }.getOrDefault(emptyList())
-                }
+                val found = withContext(Dispatchers.IO) { YouTubeMusic.recentSongs(page) }
                 if (recentFor == page.id) recent = found
             } catch (e: CancellationException) {
                 throw e

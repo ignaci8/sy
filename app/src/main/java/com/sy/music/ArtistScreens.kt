@@ -1,5 +1,7 @@
 package com.sy.music
 
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -30,6 +32,12 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+
+private enum class SongList(val label: String, val source: String) {
+    TOP("Más escuchadas", "Según las reproducciones en YouTube Music"),
+    RECENT("Más recientes", "Por año de lanzamiento en YouTube Music"),
+    GUEST("Como invitado", "Canciones de otros artistas donde participa, en YouTube Music"),
+}
 
 @Composable
 internal fun DetailScreen(model: PlayerModel) {
@@ -67,47 +75,43 @@ private fun Header(title: String, subtitle: String?, thumbnail: String?, onPlay:
 
 @Composable
 private fun ArtistView(artist: ArtistPage, model: PlayerModel) {
-    var showRecent by remember(artist.id) { mutableStateOf(false) }
+    var shown by remember(artist.id) { mutableStateOf(SongList.TOP) }
     LazyColumn {
         item {
             Header(artist.name, null, artist.thumbnail) { model.playAll(artist.topSongs, 0) }
         }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(false to "Más escuchadas", true to "Más recientes").forEach { (value, label) ->
+            // "Como invitado" solo aparece si YouTube encontró alguna: no tiene un apartado para esto.
+            val options = SongList.entries.filter { it != SongList.GUEST || model.guests.isNotEmpty() }
+            Row(Modifier.horizontalScroll(rememberScrollState()), Arrangement.spacedBy(8.dp)) {
+                options.forEach { option ->
                     FilterChip(
-                        selected = showRecent == value,
+                        selected = shown == option,
                         onClick = {
-                            showRecent = value
-                            if (value) model.loadRecent()
+                            shown = option
+                            if (option == SongList.RECENT) model.loadRecent()
                         },
-                        label = { Text(label) },
+                        label = { Text(option.label) },
                     )
                 }
             }
             Text(
-                if (showRecent) "Por año de lanzamiento, según YouTube Music" else "Según las reproducciones en YouTube Music",
+                shown.source,
                 color = Color.White.copy(alpha = 0.6f),
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(bottom = 8.dp),
             )
         }
-        val recent = model.recent
-        if (!showRecent) {
-            items(artist.topSongs) { song ->
-                SongItem(song, model, onClick = { model.playAll(artist.topSongs, artist.topSongs.indexOf(song)) })
-            }
-        } else if (model.recentLoading || recent == null) {
+        val songs = when (shown) {
+            SongList.TOP -> artist.topSongs
+            SongList.RECENT -> model.recent.takeUnless { model.recentLoading }
+            SongList.GUEST -> model.guests
+        }
+        if (songs == null) {
             item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
         } else {
-            val (own, guest) = recent
-            items(own) { song ->
-                SongItem(song, model, onClick = { model.playAll(own, own.indexOf(song)) })
-            }
-            // Solo si YouTube encontró alguna: no tiene un apartado para esto.
-            if (guest.isNotEmpty()) item { SectionTitle("Como invitado") }
-            items(guest) { song ->
-                SongItem(song, model, onClick = { model.playAll(guest, guest.indexOf(song)) })
+            items(songs) { song ->
+                SongItem(song, model, onClick = { model.playAll(songs, songs.indexOf(song)) })
             }
         }
         artist.discography.forEach { section ->
