@@ -115,6 +115,27 @@ class YouTubeTest {
     }
 
     @Test
+    fun topArtistsGroupByMainArtist() {
+        val queen = Song("https://www.youtube.com/watch?v=q", "Bohemian", "Queen - Topic", 300, null)
+        val duet = Song("https://www.youtube.com/watch?v=d", "Under Pressure", "Queen, David Bowie", 240, null)
+        val data = LibraryData(tastes = listOf(Taste(queen, 1, 0, 1), Taste(duet, 5, 0, 2), Taste(a, 2, 0, 3)))
+        assertEquals(listOf("Queen" to duet, "X" to a), data.topArtists())
+    }
+
+    @Test
+    fun homeFeedHasMixesAlbumsAndPlaylists() {
+        val shelves = YouTubeMusic.artistShelves("a-ha")!!
+        println("Inicio: ${shelves.artist.name}, ${shelves.albums.size} álbumes, playlists: ${shelves.playlists.map { it.title + " / " + it.year }}")
+        assertTrue(shelves.albums.isNotEmpty())
+        assertTrue(shelves.playlists.isNotEmpty())
+        val playlist = YouTubeMusic.album(shelves.playlists.first().id)
+        println("Playlist abierta: ${playlist.title}, ${playlist.songs.size} canciones, ej: ${playlist.songs.take(3).map { it.title + " - " + it.artist }}")
+        assertTrue(playlist.songs.size >= 5)
+        val feed = HomeFeed(albums = shelves.albums, playlists = shelves.playlists, forYou = listOf(a), key = "k", savedAt = 9)
+        assertEquals(feed, homeFromJson(feed.toJson()))
+    }
+
+    @Test
     fun importsSpotifyPlaylist() {
         val (name, tracks) = Spotify.tracks("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=abc")
         val songs = kotlinx.coroutines.runBlocking { Spotify.matchOnYouTube(tracks.take(5)) }

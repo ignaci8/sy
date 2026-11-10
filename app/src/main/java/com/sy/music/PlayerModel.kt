@@ -26,7 +26,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private const val STARTER_QUERY = "éxitos del momento"
 private const val POSITION_REFRESH_MS = 500L
 private const val MAX_ARTIST_RESULTS = 6
 private val LINK = Regex("""https?://\S+""")
@@ -34,7 +33,7 @@ private val LINK = Regex("""https?://\S+""")
 class PlayerModel(app: Application) : AndroidViewModel(app) {
     var results by mutableStateOf(emptyList<Song>())
         private set
-    var forYou by mutableStateOf(emptyList<Song>())
+    var home by mutableStateOf(HomeFeed())
         private set
     var homeLoading by mutableStateOf(true)
         private set
@@ -161,28 +160,36 @@ class PlayerModel(app: Application) : AndroidViewModel(app) {
         buffering = player.playbackState == Player.STATE_BUFFERING
     }
 
+    /** Muestra al tiro lo guardado y solo vuelve a preguntar a YouTube si ya está viejo. */
     fun loadHome() {
         homeLoading = true
         viewModelScope.launch {
             val library = Library.data.value
-            val seeds = library.forYouSeeds()
-            forYou = try {
-                withContext(Dispatchers.IO) {
-                    if (seeds.isEmpty()) {
-                        Catalog.search(STARTER_QUERY)
-                    } else {
-                        coroutineScope {
-                            library.mixForYou(seeds.map { async { Catalog.radio(it.url) } }.awaitAll())
-                        }
+            val saved = withContext(Dispatchers.IO) { Home.saved(getApplication()) }
+            if (saved != null) home = saved
+            if (saved == null || !Home.isFresh(saved, library)) {
+                try {
+                    home = withContext(Dispatchers.IO) {
+                        Home.build(library).also { Home.save(getApplication(), it) }
                     }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // Sin conexión: lo guardado de antes, o al menos tus descargas.
+                    if (saved == null) home = HomeFeed(forYou = Storage.readySongs)
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Storage.readySongs // sin conexión: lo que ya tienes guardado
             }
             homeLoading = false
         }
+    }
+
+    fun openPlaylist(playlist: Playlist) = loadDetail {
+        album = AlbumPage(
+            playlist.name,
+            "${playlist.songs.size} canciones",
+            playlist.songs.firstNotNullOfOrNull { it.thumbnail },
+            playlist.songs,
+        )
     }
 
     fun search(query: String) {

@@ -87,6 +87,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 internal val Background = Color.Black
 internal val Accent = Color(0xFF8AB4FF)
 private const val DOWNLOAD_PROGRESS_MS = 500L
+private val BIG_COVER = 160.dp
 private val Secondary = Color.White.copy(alpha = 0.7f)
 private val Raised = Color(0xFF1C1C1E)
 private val SMALL_ARTWORK = 80.dp
@@ -238,15 +239,23 @@ internal fun SectionTitle(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-internal fun CoverCard(title: String, subtitle: String?, thumbnail: String?, url: String? = null, onClick: () -> Unit) {
+internal fun CoverCard(
+    title: String,
+    subtitle: String?,
+    thumbnail: String?,
+    url: String? = null,
+    size: Dp = 120.dp,
+    cover: (@Composable () -> Unit)? = null,
+    onClick: () -> Unit,
+) {
     Column(
         Modifier
             .padding(end = 12.dp)
-            .width(120.dp)
+            .width(size)
             .clickable(onClick = onClick),
     ) {
         val playing = url != null && url == LocalPlayingUrl.current
-        ListArtwork(thumbnail, 120.dp, playing)
+        if (cover != null) cover() else ListArtwork(thumbnail, size, playing)
         Text(
             title,
             color = if (playing) Color.White else Color.Unspecified,
@@ -256,9 +265,37 @@ internal fun CoverCard(title: String, subtitle: String?, thumbnail: String?, url
             modifier = Modifier.padding(top = 6.dp),
         )
         subtitle?.let {
-            Text(it, color = Secondary, style = MaterialTheme.typography.bodySmall, maxLines = 1)
+            Text(it, color = Secondary, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
+}
+
+/** Como en Spotify: cuatro portadas de la playlist en una carátula. */
+@Composable
+private fun PlaylistCover(songs: List<Song>, size: Dp) {
+    val covers = songs.mapNotNull { it.thumbnail }.distinct().take(4)
+    if (covers.size < 4) return Artwork(covers.firstOrNull(), size)
+    Column(Modifier.size(size).clip(RoundedCornerShape(8.dp))) {
+        covers.chunked(2).forEach { row ->
+            Row {
+                row.forEach {
+                    AsyncImage(
+                        it.replace("=w800-h800", "=w300-h300"),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.size(size / 2),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun <T> CoverRow(title: String, items: List<T>, card: @Composable (T) -> Unit) {
+    if (items.isEmpty()) return
+    SectionTitle(title)
+    LazyRow { items(items) { card(it) } }
 }
 
 @Composable
@@ -275,24 +312,50 @@ private fun HomeTab(model: PlayerModel) {
                 }
             }
         }
-        if (recent.isNotEmpty()) {
-            item { SectionTitle("Escuchado recientemente") }
-            item {
-                LazyRow {
-                    items(recent) { song ->
-                        CoverCard(song.title, null, song.thumbnail, song.url) { model.play(song) }
-                    }
+        val home = model.home
+        item {
+            CoverRow("Tus playlists", library.playlists.filter { it.songs.isNotEmpty() }) { playlist ->
+                CoverCard(
+                    playlist.name,
+                    "${playlist.songs.size} canciones",
+                    null,
+                    size = BIG_COVER,
+                    cover = { PlaylistCover(playlist.songs, BIG_COVER) },
+                ) { model.openPlaylist(playlist) }
+            }
+        }
+        item {
+            CoverRow("Escuchado recientemente", recent) { song ->
+                CoverCard(song.title, song.artist, song.thumbnail, song.url, BIG_COVER) { model.play(song) }
+            }
+        }
+        item {
+            CoverRow("Mixes para ti", home.mixes) { mix ->
+                CoverCard("Mix de ${mix.artist}", "Con ${mix.seed.title}", mix.thumbnail, size = BIG_COVER) {
+                    model.play(mix.seed) // la radio de YouTube sigue sola desde esta canción
+                }
+            }
+        }
+        item {
+            CoverRow("Álbumes de tus artistas", home.albums) { album ->
+                CoverCard(album.title, album.year, album.thumbnail, size = BIG_COVER) { model.openAlbum(album.id) }
+            }
+        }
+        item {
+            CoverRow("Playlists para ti", home.playlists) { playlist ->
+                CoverCard(playlist.title, playlist.year, playlist.thumbnail, size = BIG_COVER) {
+                    model.openAlbum(playlist.id)
                 }
             }
         }
         item { SectionTitle(if (personal) "Para ti" else "Para empezar") }
         if (model.homeLoading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
-        if (!model.homeLoading && model.forYou.isEmpty()) {
+        if (!model.homeLoading && home.forYou.isEmpty()) {
             item {
                 TextButton(onClick = model::loadHome) { Text("Sin conexión. Reintentar") }
             }
         }
-        items(model.forYou) { song -> SongItem(song, model) }
+        items(home.forYou) { song -> SongItem(song, model) }
     }
 }
 

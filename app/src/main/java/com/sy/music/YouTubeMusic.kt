@@ -34,6 +34,12 @@ data class ArtistPage(
 )
 data class AlbumPage(val title: String, val artist: String, val thumbnail: String?, val songs: List<Song>)
 
+/** Lo justo del perfil de un artista para el Inicio: una sola consulta, sin páginas extra. */
+data class ArtistShelves(val artist: ArtistRef, val albums: List<Album>, val playlists: List<Album>)
+
+/** "Queen, David Bowie" o "Queen - Topic" son de Queen. */
+fun mainArtist(raw: String) = raw.removeSuffix(" - Topic").substringBefore(',').substringBefore(" & ").trim()
+
 private fun collect(node: Any?, key: String, out: MutableList<JSONObject>) {
     when (node) {
         is JSONObject -> node.keys().forEach { name ->
@@ -134,9 +140,26 @@ object YouTubeMusic {
 
     /** Las canciones traen el artista como texto; este busca su perfil. */
     fun artistFromName(rawName: String): ArtistPage? {
-        val name = rawName.removeSuffix(" - Topic").substringBefore(',').substringBefore(" & ").trim()
-        val match = searchArtists(name).firstOrNull() ?: return null
+        val match = searchArtists(mainArtist(rawName)).firstOrNull() ?: return null
         return artist(match.id)
+    }
+
+    fun artistShelves(rawName: String): ArtistShelves? {
+        val match = searchArtists(mainArtist(rawName)).firstOrNull() ?: return null
+        val root = browse(match.id)
+        val playlists = all(root, "musicTwoRowItemRenderer").mapNotNull { item ->
+            val id = item.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")
+                ?.optString("browseId").orEmpty()
+            if (!id.startsWith("VL")) return@mapNotNull null
+            Album(
+                id = id,
+                title = runs(item.optJSONObject("title")).firstOrNull().orEmpty(),
+                // "Lista de reproducción • YouTube Music": basta con quién la hizo.
+                year = runs(item.optJSONObject("subtitle")).joinToString("").split(" • ").getOrNull(1).orEmpty(),
+                thumbnail = thumbnailOf(item.optJSONObject("thumbnailRenderer")),
+            )
+        }
+        return ArtistShelves(match, albumsIn(root), playlists.distinctBy { it.id })
     }
 
     fun artist(id: String): ArtistPage {
