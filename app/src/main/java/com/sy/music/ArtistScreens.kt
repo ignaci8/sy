@@ -1,6 +1,14 @@
 package com.sy.music
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.material3.FilterChip
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -59,13 +67,48 @@ private fun Header(title: String, subtitle: String?, thumbnail: String?, onPlay:
 
 @Composable
 private fun ArtistView(artist: ArtistPage, model: PlayerModel) {
+    var showRecent by remember(artist.id) { mutableStateOf(false) }
     LazyColumn {
         item {
             Header(artist.name, null, artist.thumbnail) { model.playAll(artist.topSongs, 0) }
         }
-        if (artist.topSongs.isNotEmpty()) item { SectionTitle("Más escuchadas") }
-        items(artist.topSongs) { song ->
-            SongItem(song, model, onClick = { model.playAll(artist.topSongs, artist.topSongs.indexOf(song)) })
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(false to "Más escuchadas", true to "Más recientes").forEach { (value, label) ->
+                    FilterChip(
+                        selected = showRecent == value,
+                        onClick = {
+                            showRecent = value
+                            if (value) model.loadRecent()
+                        },
+                        label = { Text(label) },
+                    )
+                }
+            }
+            Text(
+                if (showRecent) "Por año de lanzamiento, según YouTube Music" else "Según las reproducciones en YouTube Music",
+                color = Color.White.copy(alpha = 0.6f),
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+        }
+        val recent = model.recent
+        if (!showRecent) {
+            items(artist.topSongs) { song ->
+                SongItem(song, model, onClick = { model.playAll(artist.topSongs, artist.topSongs.indexOf(song)) })
+            }
+        } else if (model.recentLoading || recent == null) {
+            item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+        } else {
+            val (own, guest) = recent
+            items(own) { song ->
+                SongItem(song, model, onClick = { model.playAll(own, own.indexOf(song)) })
+            }
+            // Solo si YouTube encontró alguna: no tiene un apartado para esto.
+            if (guest.isNotEmpty()) item { SectionTitle("Como invitado") }
+            items(guest) { song ->
+                SongItem(song, model, onClick = { model.playAll(guest, guest.indexOf(song)) })
+            }
         }
         artist.discography.forEach { section ->
             item { SectionTitle(section.label) }

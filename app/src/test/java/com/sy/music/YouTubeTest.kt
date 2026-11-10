@@ -115,6 +115,16 @@ class YouTubeTest {
     }
 
     @Test
+    fun artistRecentAndGuestSongs() {
+        val page = YouTubeMusic.artistFromName("Bad Bunny")!!
+        val recent = YouTubeMusic.recentSongs(page)
+        println("Recientes: ${recent.size}, ej: ${recent.take(4).map { it.title }}")
+        assertTrue(recent.size >= 5)
+        val guest = YouTubeMusic.guestSongs(page, recent.map { it.url }.toSet())
+        println("Como invitado: ${guest.size}, ej: ${guest.take(5).map { it.title + " - " + it.artist }}")
+    }
+
+    @Test
     fun topArtistsGroupByMainArtist() {
         val queen = Song("https://www.youtube.com/watch?v=q", "Bohemian", "Queen - Topic", 300, null)
         val duet = Song("https://www.youtube.com/watch?v=d", "Under Pressure", "Queen, David Bowie", 240, null)

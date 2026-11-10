@@ -15,7 +15,10 @@ import java.io.IOException
 private const val BROWSER =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0"
 private const val ONLY_ARTISTS = "EgWKAQIgAWoMEA4QChADEAQQCRAF"
+private const val ONLY_SONGS = "EgWKAQIIAWoMEA4QChADEAQQCRAF"
 private const val MAX_TOP_SONGS = 30
+private const val RECENT_RELEASES = 8
+private const val MAX_RECENT_SONGS = 40
 private const val SPOTIFY_PARALLEL_SEARCHES = 4
 private val DURATION = Regex("""^\d+(:\d+)+$""")
 private val THUMB_SIZE = Regex("=w\\d+-h\\d+")
@@ -195,6 +198,30 @@ object YouTubeMusic {
             )
         }
         return ArtistPage(id, name, thumbnailOf(header?.optJSONObject("thumbnail")), topSongs, discography)
+    }
+
+    /** Sus lanzamientos del más nuevo al más antiguo. YouTube Music solo da el año. */
+    fun recentSongs(artist: ArtistPage): List<Song> {
+        val releases = artist.discography.flatMap { it.albums }.distinctBy { it.id }
+            .sortedByDescending { it.year.toIntOrNull() ?: 0 } // estable: dentro del año queda el orden de YouTube Music
+            .take(RECENT_RELEASES)
+        return releases.flatMap { runCatching { album(it.id).songs }.getOrDefault(emptyList()) }
+            .distinctBy { it.url }
+            .take(MAX_RECENT_SONGS)
+    }
+
+    /** Canciones de otros donde el artista es invitado. Pueden no aparecer: YouTube no tiene un apartado para esto. */
+    fun guestSongs(artist: ArtistPage, known: Set<String>): List<Song> {
+        val name = artist.name.lowercase()
+        return listOf("${artist.name} feat", "${artist.name} ft").flatMap { query ->
+            all(call("search", JSONObject().put("query", query).put("params", ONLY_SONGS)), "musicResponsiveListItemRenderer")
+        }.mapNotNull { item ->
+            val credits = column(item, 1).joinToString("").substringBefore(" • ")
+            val song = songFromRow(item, credits, null)?.copy(artist = credits) ?: return@mapNotNull null
+            val main = mainArtist(credits).lowercase()
+            val featured = name in credits.lowercase() || name in song.title.lowercase()
+            song.takeIf { featured && main != name && it.url !in known }
+        }.distinctBy { it.url }
     }
 
     private fun albumsIn(node: Any?): List<Album> = all(node, "musicTwoRowItemRenderer").mapNotNull { item ->

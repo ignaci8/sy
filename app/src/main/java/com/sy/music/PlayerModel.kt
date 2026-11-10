@@ -57,6 +57,12 @@ class PlayerModel(app: Application) : AndroidViewModel(app) {
         private set
     var detailLoading by mutableStateOf(false)
         private set
+    /** Las del artista abierto, de la más nueva a la más antigua, y aparte donde es invitado. */
+    var recent by mutableStateOf<Pair<List<Song>, List<Song>>?>(null)
+        private set
+    var recentLoading by mutableStateOf(false)
+        private set
+    private var recentFor: String? = null
     var collapseRequests by mutableIntStateOf(0)
         private set
     val detailOpen get() = artist != null || album != null || detailLoading
@@ -246,6 +252,32 @@ class PlayerModel(app: Application) : AndroidViewModel(app) {
         album = null
         artist = withContext(Dispatchers.IO) { YouTubeMusic.artistFromName(name) }
         if (artist == null) toast("No encontré ese artista")
+    }
+
+    /** "Más recientes" pide varios álbumes: solo se carga si lo eligen. */
+    fun loadRecent() {
+        val page = artist ?: return
+        if (recentFor == page.id) return
+        recentFor = page.id
+        recent = null
+        recentLoading = true
+        viewModelScope.launch {
+            try {
+                val found = withContext(Dispatchers.IO) {
+                    val own = YouTubeMusic.recentSongs(page)
+                    val known = (own + page.topSongs).map { it.url }.toSet()
+                    own to runCatching { YouTubeMusic.guestSongs(page, known) }.getOrDefault(emptyList())
+                }
+                if (recentFor == page.id) recent = found
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                recentFor = null
+                toast("No se pudieron cargar las recientes")
+            } finally {
+                recentLoading = false
+            }
+        }
     }
 
     fun openAlbum(id: String) = loadDetail {
