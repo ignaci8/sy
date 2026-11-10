@@ -120,8 +120,14 @@ class YouTubeTest {
         val recent = YouTubeMusic.recentSongs(page)
         println("Recientes: ${recent.size}, ej: ${recent.take(4).map { it.title }}")
         assertTrue(recent.size >= 5)
-        val guest = YouTubeMusic.guestSongs(page, recent.map { it.url }.toSet())
+        val guest = YouTubeMusic.guestSongs(page)
         println("Como invitado: ${guest.size}, ej: ${guest.take(5).map { it.title + " - " + it.artist }}")
+
+        val tangana = YouTubeMusic.artistFromName("C. Tangana")!!
+        val tanganaGuest = YouTubeMusic.guestSongs(tangana)
+        println("C. Tangana invitado: ${tanganaGuest.take(6).map { it.title + " - " + it.artist }}")
+        assertTrue(tanganaGuest.any { it.title.contains("Tranquil", ignoreCase = true) })
+        assertTrue(tanganaGuest.none { it.artist.startsWith("C. Tangana") })
     }
 
     @Test

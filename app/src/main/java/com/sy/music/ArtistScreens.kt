@@ -34,9 +34,9 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 
 private enum class SongList(val label: String, val source: String) {
-    TOP("Más escuchadas", "Según las reproducciones en YouTube Music"),
-    RECENT("Más recientes", "Por año de lanzamiento en YouTube Music"),
-    GUEST("Como invitado", "Canciones de otros artistas donde participa, en YouTube Music"),
+    TOP("Más escuchadas", "Según las reproducciones (YouTube Music)"),
+    RECENT("Más recientes", "Por año de lanzamiento (YouTube Music)"),
+    GUEST("Como invitado", "Canciones de otros artistas donde participa (YouTube Music)"),
 }
 
 @Composable

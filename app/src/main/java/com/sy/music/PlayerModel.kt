@@ -264,7 +264,7 @@ class PlayerModel(app: Application) : AndroidViewModel(app) {
         guests = emptyList()
         viewModelScope.launch {
             val found = withContext(Dispatchers.IO) {
-                runCatching { YouTubeMusic.guestSongs(page, page.topSongs.map { it.url }.toSet()) }
+                runCatching { YouTubeMusic.guestSongs(page) }
                     .getOrDefault(emptyList())
             }
             if (artist?.id == page.id) guests = found

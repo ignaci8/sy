@@ -211,17 +211,21 @@ object YouTubeMusic {
     }
 
     /** Canciones de otros donde el artista es invitado. Pueden no aparecer: YouTube no tiene un apartado para esto. */
-    fun guestSongs(artist: ArtistPage, known: Set<String>): List<Song> {
+    fun guestSongs(artist: ArtistPage): List<Song> {
         val name = artist.name.lowercase()
-        return listOf("${artist.name} feat", "${artist.name} ft").flatMap { query ->
+        // Las de otro artista en sus más escuchadas son colaboraciones seguras: van primero.
+        val fromTop = artist.topSongs.filter { mainArtist(it.artist).lowercase() != name }
+        val searched = listOf("${artist.name} feat", "${artist.name} ft").flatMap { query ->
             all(call("search", JSONObject().put("query", query).put("params", ONLY_SONGS)), "musicResponsiveListItemRenderer")
         }.mapNotNull { item ->
             val credits = column(item, 1).joinToString("").substringBefore(" • ")
             val song = songFromRow(item, credits, null)?.copy(artist = credits) ?: return@mapNotNull null
-            val main = mainArtist(credits).lowercase()
+            // El primer nombre de los créditos es el dueño de la canción ("C. Tangana y Nathy Peluso").
+            val main = column(item, 1).firstOrNull().orEmpty().trim().lowercase()
             val featured = name in credits.lowercase() || name in song.title.lowercase()
-            song.takeIf { featured && main != name && it.url !in known }
-        }.distinctBy { it.url }
+            song.takeIf { featured && main != name }
+        }
+        return (fromTop + searched).distinctBy { it.url }
     }
 
     private fun albumsIn(node: Any?): List<Album> = all(node, "musicTwoRowItemRenderer").mapNotNull { item ->
