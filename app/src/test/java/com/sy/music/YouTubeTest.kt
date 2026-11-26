@@ -54,6 +54,28 @@ class YouTubeTest {
     }
 
     @Test
+    fun smarterSuggestions() {
+        // Saltar al principio cuenta doble.
+        assertEquals(2, LibraryData().recorded(a, played = false, now = 1, earlySkip = true).tastes.first().skips)
+
+        // Lo reciente y lo favorito pesan más que lo viejo.
+        val day = 86_400_000L
+        val old = Song("https://www.youtube.com/watch?v=o", "Vieja", "V", 200, null)
+        val fav = Song("https://www.youtube.com/watch?v=f", "Fav", "F", 200, null)
+        val data = LibraryData(
+            favorites = listOf(fav),
+            tastes = listOf(Taste(old, 5, 0, 0), Taste(a, 3, 0, 60 * day), Taste(fav, 1, 0, 60 * day)),
+        )
+        assertEquals(listOf(fav, a, old), data.forYouSeeds(now = 60 * day))
+
+        // Máximo 2 por artista, sin en vivo ni videos largos.
+        val same = (1..4).map { Song("https://www.youtube.com/watch?v=s$it", "Tema $it", "Mismo", 200, null) }
+        val live = Song("https://www.youtube.com/watch?v=l", "Tema (En Vivo)", "Otro", 200, null)
+        val long = Song("https://www.youtube.com/watch?v=g", "Mix", "Otro2", 3600, null)
+        assertEquals(same.take(2), LibraryData().suggestable(same + live + long))
+    }
+
+    @Test
     fun parsesSyncedLyrics() {
         val lines = parseLrc("[00:12.50] Hola\n[01:02.00]Chao\n[01:03.00]\nsin marca")
         assertEquals(listOf(LyricLine(12_500, "Hola"), LyricLine(62_000, "Chao")), lines)
@@ -126,7 +148,9 @@ class YouTubeTest {
         val tangana = YouTubeMusic.artistFromName("C. Tangana")!!
         val tanganaGuest = YouTubeMusic.guestSongs(tangana)
         println("C. Tangana invitado: ${tanganaGuest.take(6).map { it.title + " - " + it.artist }}")
-        assertTrue(tanganaGuest.any { it.title.contains("Tranquil", ignoreCase = true) })
+        // Las de otro artista en sus más escuchadas siempre entran; las suyas nunca.
+        val othersInTop = tangana.topSongs.filter { !it.artist.startsWith("C. Tangana") }.map { it.url }
+        assertTrue(tanganaGuest.map { it.url }.containsAll(othersInTop))
         assertTrue(tanganaGuest.none { it.artist.startsWith("C. Tangana") })
     }
 

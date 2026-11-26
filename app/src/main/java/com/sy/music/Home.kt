@@ -28,14 +28,17 @@ data class HomeFeed(
 )
 
 /** Los artistas que más escuchas, cada uno con la canción suya que más te gusta. */
-fun LibraryData.topArtists(): List<Pair<String, Song>> = tastes.filter { it.plays > 0 }
+fun LibraryData.topArtists(now: Long = System.currentTimeMillis()): List<Pair<String, Song>> {
+    val affinity = affinities(now)
+    return tastes.filter { it.plays > 0 }
     .groupBy { mainArtist(it.song.artist) }
     .filterKeys { it.isNotBlank() }
-    .map { (artist, list) -> Triple(artist, list.sumOf { it.score }, list.maxBy { it.score }.song) }
+    .map { (artist, list) -> Triple(artist, list.sumOf { affinity.getValue(it) }, list.maxBy { affinity.getValue(it) }.song) }
     .filter { it.second > 0 }
     .sortedByDescending { it.second }
     .take(TOP_ARTISTS)
     .map { it.first to it.third }
+}
 
 /** Si cambian tus artistas o tus canciones favoritas, el Inicio se vuelve a pedir. */
 fun LibraryData.homeKey() =

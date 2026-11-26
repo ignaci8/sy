@@ -214,7 +214,7 @@ object YouTubeMusic {
     fun guestSongs(artist: ArtistPage): List<Song> {
         val name = artist.name.lowercase()
         // Las de otro artista en sus más escuchadas son colaboraciones seguras: van primero.
-        val fromTop = artist.topSongs.filter { mainArtist(it.artist).lowercase() != name }
+        val fromTop = artist.topSongs.filter { !mainArtist(it.artist).lowercase().startsWith(name) }
         val searched = listOf("${artist.name} feat", "${artist.name} ft").flatMap { query ->
             all(call("search", JSONObject().put("query", query).put("params", ONLY_SONGS)), "musicResponsiveListItemRenderer")
         }.mapNotNull { item ->
@@ -223,7 +223,7 @@ object YouTubeMusic {
             // El primer nombre de los créditos es el dueño de la canción ("C. Tangana y Nathy Peluso").
             val main = column(item, 1).firstOrNull().orEmpty().trim().lowercase()
             val featured = name in credits.lowercase() || name in song.title.lowercase()
-            song.takeIf { featured && main != name }
+            song.takeIf { featured && !main.startsWith(name) } // "Artista - Otro" también es suya
         }
         return (fromTop + searched).distinctBy { it.url }
     }

@@ -24,6 +24,15 @@ private const val MAX_TASTES = 500
 private const val SEEDS = 3
 private const val FOR_YOU_SIZE = 40
 private const val DISLIKE_SKIPS = 3
+private const val DISLIKED_ARTIST_SKIPS = 6
+private const val FAVORITE_BONUS = 3
+private const val PLAYLIST_BONUS = 2
+private const val DAY_MS = 86_400_000L
+private const val RECENCY_DAYS = 14.0
+private const val FAMILIAR_SIZE = 30
+private const val MAX_PER_ARTIST = 2
+private const val MAX_SONG_SECONDS = 600
+private val NOT_MUSIC = Regex("""\b(en vivo|live|full album|[aá]lbum completo|concierto|concert)\b""", RegexOption.IGNORE_CASE)
 
 data class Playlist(val id: String, val name: String, val songs: List<Song>)
 
@@ -101,12 +110,13 @@ fun LibraryData.mergedWith(other: LibraryData): LibraryData {
     )
 }
 
-fun LibraryData.recorded(song: Song, played: Boolean, now: Long): LibraryData {
+/** Saltar en los primeros segundos dice "no me gusta" con más fuerza: cuenta doble. */
+fun LibraryData.recorded(song: Song, played: Boolean, now: Long, earlySkip: Boolean = false): LibraryData {
     val old = tastes.firstOrNull { it.song.url == song.url }
     val updated = Taste(
         song = song,
         plays = (old?.plays ?: 0) + if (played) 1 else 0,
-        skips = (old?.skips ?: 0) + if (played) 0 else 1,
+        skips = (old?.skips ?: 0) + if (played) 0 else if (earlySkip) 2 else 1,
         lastPlayed = now,
     )
     return copy(tastes = (listOf(updated) + tastes.filter { it.song.url != song.url }).take(MAX_TASTES))
@@ -115,18 +125,57 @@ fun LibraryData.recorded(song: Song, played: Boolean, now: Long): LibraryData {
 fun LibraryData.dislikedUrls(): Set<String> =
     tastes.filter { it.skips >= DISLIKE_SKIPS && it.skips > it.plays }.map { it.song.url }.toSet()
 
-fun LibraryData.forYouSeeds(): List<Song> =
-    tastes.filter { it.plays > 0 }.sortedByDescending { it.score }.take(SEEDS).map { it.song }
+/** Artistas que casi siempre saltas: dejan de aparecer en las sugerencias. */
+fun LibraryData.dislikedArtists(): Set<String> = tastes.groupBy { mainArtist(it.song.artist).lowercase() }
+    .filter { (_, list) -> list.sumOf { it.skips } >= DISLIKED_ARTIST_SKIPS && list.sumOf { it.skips } > 2 * list.sumOf { it.plays } }
+    .keys
+
+/**
+ * Cuánto te gusta una canción hoy: lo escuchado menos lo saltado, más un extra si es favorita
+ * o está en una playlist, y pierde peso con el tiempo para seguir tu ánimo actual.
+ */
+fun LibraryData.affinities(now: Long): Map<Taste, Double> {
+    val favorite = favorites.map { it.url }.toSet()
+    val listed = playlists.flatMap { it.songs }.map { it.url }.toSet()
+    return tastes.associateWith { taste ->
+        val bonus = (if (taste.song.url in favorite) FAVORITE_BONUS else 0) + (if (taste.song.url in listed) PLAYLIST_BONUS else 0)
+        val days = (now - taste.lastPlayed).coerceAtLeast(0) / DAY_MS.toDouble()
+        (taste.score + bonus) / (1 + days / RECENCY_DAYS)
+    }
+}
+
+fun LibraryData.forYouSeeds(now: Long = System.currentTimeMillis()): List<Song> =
+    affinities(now).filter { (taste, value) -> taste.plays > 0 && value > 0 }
+        .entries.sortedByDescending { it.value }.take(SEEDS).map { it.key.song }
+
+/** Para meter en la radio de vez en cuando: canciones que ya sabes que te gustan. */
+fun LibraryData.familiar(now: Long = System.currentTimeMillis()): List<Song> =
+    (favorites + affinities(now).filter { it.value > 0 }.entries.sortedByDescending { it.value }.take(FAMILIAR_SIZE).map { it.key.song })
+        .distinctBy { it.url }
+
+/** Lo que no debe entrar en sugerencias: lo que saltas, y como mucho 2 por artista. */
+fun LibraryData.suggestable(songs: List<Song>, alreadyPerArtist: Map<String, Int> = emptyMap()): List<Song> {
+    val disliked = dislikedUrls()
+    val badArtists = dislikedArtists()
+    val perArtist = alreadyPerArtist.toMutableMap()
+    return songs.filter { song ->
+        val artist = mainArtist(song.artist).lowercase()
+        val ok = song.url !in disliked && artist !in badArtists && !isNotMusic(song) &&
+            (perArtist[artist] ?: 0) < MAX_PER_ARTIST
+        if (ok) perArtist[artist] = (perArtist[artist] ?: 0) + 1
+        ok
+    }
+}
+
+/** Videos largos, en vivo o álbumes completos no son canciones para una radio. */
+fun isNotMusic(song: Song) = song.seconds > MAX_SONG_SECONDS || NOT_MUSIC.containsMatchIn(song.title)
 
 /** Intercala las radios para que ningún gusto ocupe toda la lista. */
-fun LibraryData.mixForYou(radios: List<List<Song>>): List<Song> {
-    val disliked = dislikedUrls()
-    return (0 until (radios.maxOfOrNull { it.size } ?: 0))
+fun LibraryData.mixForYou(radios: List<List<Song>>): List<Song> = suggestable(
+    (0 until (radios.maxOfOrNull { it.size } ?: 0))
         .flatMap { i -> radios.mapNotNull { it.getOrNull(i) } }
-        .distinctBy { it.url }
-        .filter { it.url !in disliked }
-        .take(FOR_YOU_SIZE)
-}
+        .distinctBy { it.url },
+).take(FOR_YOU_SIZE)
 
 /** Todo lo tuyo queda en un archivo del celular; nada depende de YouTube. */
 object Library {
@@ -175,8 +224,8 @@ object Library {
         if (adding && !Storage.isReady(song.url)) Storage.download(context, song)
     }
 
-    fun record(song: Song, played: Boolean) =
-        change { it.recorded(song, played, System.currentTimeMillis()) }
+    fun record(song: Song, played: Boolean, earlySkip: Boolean = false) =
+        change { it.recorded(song, played, System.currentTimeMillis(), earlySkip) }
 
     fun createPlaylist(name: String, songs: List<Song> = emptyList()) {
         change { it.copy(playlists = it.playlists + Playlist(UUID.randomUUID().toString(), name, songs)) }

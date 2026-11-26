@@ -19,6 +19,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -49,6 +50,9 @@ private const val PRELOAD_DELAY_MS = 1_000L
 private const val SAFE_BUFFER_MS = 20_000L
 private const val BUFFER_CHECK_MS = 1_000L
 private const val SAVE_POSITION_MS = 10_000L
+private const val EARLY_SKIP_MS = 10_000L
+private const val LIKED_MEMORY = 5
+private const val FAMILIAR_EVERY = 5
 private const val MAX_SAVED_SONGS = 100
 private const val LAST_SESSION = "ultima_sesion"
 private const val SAVED_QUEUE = "fila"
@@ -94,6 +98,9 @@ class PlaybackService : MediaSessionService() {
     private var stall: Job? = null
     private var preload: Job? = null
     private val playedOffline = mutableSetOf<String>()
+    /** Lo que escuchaste completo hace poco: de ahí sigue la radio, para que no se desvíe. */
+    private var likedThisSession = listOf<String>()
+    private val playedThisSession = mutableSetOf<String>()
 
     /** Escuchar más de 30 s o llegar al final cuenta como gusto; cambiar antes, como salto. */
     private val tasteListener = object : Player.Listener {
@@ -110,7 +117,11 @@ class PlaybackService : MediaSessionService() {
             if (item.mediaId == new.mediaItem?.mediaId) return
             val played = reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION || old.positionMs >= MIN_LISTEN_MS
             // Una canción que no alcanzó a sonar por falta de internet no dice nada de tus gustos.
-            if (played || item.mediaId == soundedId) Library.record(item.toSong(), played)
+            if (played || item.mediaId == soundedId) {
+                Library.record(item.toSong(), played, earlySkip = !played && old.positionMs < EARLY_SKIP_MS)
+            }
+            if (played) likedThisSession = (likedThisSession - item.mediaId + item.mediaId).takeLast(LIKED_MEMORY)
+            playedThisSession += item.mediaId
         }
     }
 
@@ -182,6 +193,18 @@ class PlaybackService : MediaSessionService() {
                 ) = Futures.immediateFuture(
                     items.map { it.buildUpon().setUri(Storage.uriFor(it.mediaId)).build() }.toMutableList(),
                 )
+
+                // El auto o los audífonos piden "reproducir" con SY cerrada: sigue lo último que sonaba.
+                override fun onPlaybackResumption(
+                    session: MediaSession,
+                    controller: MediaSession.ControllerInfo,
+                ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+                    val items = lastSessionItems()
+                        ?: return Futures.immediateFailedFuture(UnsupportedOperationException("Nada que retomar"))
+                    return Futures.immediateFuture(
+                        MediaSession.MediaItemsWithStartPosition(items, 0, saved.getLong(SAVED_POSITION, 0)),
+                    )
+                }
             })
             .build()
 
@@ -236,21 +259,20 @@ class PlaybackService : MediaSessionService() {
 
     /** Al abrir de nuevo, la última canción queda en pausa en el segundo donde quedó. */
     private fun restoreLastSession() {
-        val songs = try {
-            val list = JSONArray(saved.getString(SAVED_QUEUE, null) ?: return)
-            (0 until list.length()).map { songFromJson(list.getJSONObject(it)) }
-        } catch (e: org.json.JSONException) {
-            Log.w("SY", "No se pudo leer la última canción", e)
-            return
-        }
-        if (songs.isEmpty()) return
-        exo.setMediaItems(
-            songs.map { it.toMediaItem().buildUpon().setUri(Storage.uriFor(it.url)).build() },
-            0,
-            saved.getLong(SAVED_POSITION, 0),
-        )
+        val items = lastSessionItems() ?: return
+        exo.setMediaItems(items, 0, saved.getLong(SAVED_POSITION, 0))
         exo.shuffleModeEnabled = saved.getBoolean(SAVED_SHUFFLE, false)
         exo.prepare()
+    }
+
+    private fun lastSessionItems(): List<MediaItem>? = try {
+        val list = JSONArray(saved.getString(SAVED_QUEUE, null) ?: return null)
+        (0 until list.length()).map { songFromJson(list.getJSONObject(it)) }
+            .map { it.toMediaItem().buildUpon().setUri(Storage.uriFor(it.url)).build() }
+            .ifEmpty { null }
+    } catch (e: org.json.JSONException) {
+        Log.w("SY", "No se pudo leer la última canción", e)
+        null
     }
 
     private fun isAvailable(item: MediaItem) = Storage.isAvailable(item.localConfiguration?.uri.toString())
@@ -468,19 +490,19 @@ class PlaybackService : MediaSessionService() {
             return
         }
 
-        val seed = player.getMediaItemAt(count - 1).mediaId
+        val tail = player.getMediaItemAt(count - 1).mediaId
+        val inQueue = queuedIds()
+        // Desde algo que escuchaste completo en esta fila, no desde la última sugerencia.
+        val seed = likedThisSession.filter { it in inQueue }.takeLast(LIKED_MEMORY).randomOrNull() ?: tail
         refilling = true
         scope.launch {
             try {
                 val songs = withContext(Dispatchers.IO) { Catalog.radio(seed) }
                 val current = session.player
                 val queued = queuedIds()
-                val disliked = Library.data.value.dislikedUrls()
                 refilling = false
-                if (seed in queued) {
-                    current.addMediaItems(
-                        songs.filter { it.url !in queued && it.url !in disliked }.map { it.toMediaItem() },
-                    )
+                if (tail in queued) {
+                    current.addMediaItems(radioBatch(songs, queued).map { it.toMediaItem() })
                 } else {
                     refillRadio() // el usuario eligió otra canción mientras cargaba
                 }
@@ -493,6 +515,22 @@ class PlaybackService : MediaSessionService() {
                 session.player.addMediaItems(
                     Storage.readySongs.filter { it.url !in queued }.shuffled().map { it.toMediaItem() },
                 )
+            }
+        }
+    }
+
+    /** Lo nuevo sin repetidos ni saltados, máximo 2 por artista, y cada tanto una que ya te gusta. */
+    private fun radioBatch(songs: List<Song>, queued: Set<String>): List<Song> {
+        val library = Library.data.value
+        val player = session.player
+        val upcomingArtists = (player.currentMediaItemIndex until player.mediaItemCount)
+            .groupingBy { mainArtist(player.getMediaItemAt(it).toSong().artist).lowercase() }.eachCount()
+        val fresh = library.suggestable(songs.filter { it.url !in queued }, upcomingArtists)
+        val familiar = library.familiar().filter { it.url !in queued && it.url !in playedThisSession }.shuffled().iterator()
+        return buildList {
+            fresh.forEachIndexed { i, song ->
+                add(song)
+                if ((i + 1) % FAMILIAR_EVERY == 0 && familiar.hasNext()) add(familiar.next())
             }
         }
     }
